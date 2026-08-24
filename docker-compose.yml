@@ -1,0 +1,101 @@
+# Pile pmu-pronostics — prévue pour un déploiement Portainer « dépôt Git ».
+#
+# Portainer clone le dépôt, lit CE fichier à la racine, construit l'image
+# depuis le Dockerfile voisin, et injecte les variables définies dans
+# l'onglet « Environment variables » de la stack.
+#
+# ⚠️ Pas de clé `name:` ici : Portainer nomme lui-même le projet Compose
+# d'après le nom de la stack. En déclarer un second provoque des
+# conteneurs orphelins à chaque redéploiement.
+#
+# ⚠️ Pas de fichier .env non plus : sur une stack Git, Portainer n'en lit
+# aucun. Les variables se saisissent dans son interface (voir
+# GUIDE_PORTAINER.md). C'est d'ailleurs mieux : les mots de passe ne
+# partent pas dans le dépôt.
+#
+# À faire tourner sur une machine qui reste allumée — un conteneur LXC
+# Proxmox convient. Pas sur la box Home Assistant : HAOS n'exécute pas
+# de conteneurs arbitraires.
+
+services:
+
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-pmu}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD manquant - a definir dans les variables de la stack Portainer}
+      POSTGRES_DB: ${POSTGRES_DB:-pmu}
+      # Le tri chronologique conditionne toutes les features anti-fuite :
+      # locale figée pour que l'ordre soit identique d'une machine à l'autre.
+      LANG: C.UTF-8
+      TZ: ${TZ:-Europe/Paris}
+    volumes:
+      - pmu_db:/var/lib/postgresql/data
+    # Port volontairement non publié : la base n'a aucune raison d'être
+    # joignable depuis le réseau. Pour l'inspecter, passer par la console
+    # Portainer du conteneur.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-pmu} -d ${POSTGRES_DB:-pmu}"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+
+  collecteur:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: pmu-pronostics:0.1
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-pmu}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-pmu}
+      TZ: ${TZ:-Europe/Paris}
+      # Amorçage automatique au premier démarrage : le conteneur rattrape
+      # l'historique puis entraîne son premier modèle, sans commande à
+      # taper. Mettre 0 pour tout piloter à la main.
+      PMU_BACKFILL_JOURS: ${PMU_BACKFILL_JOURS:-30}
+      PMU_MIN_PARTANTS: ${PMU_MIN_PARTANTS:-15000}
+      PMU_RPS: ${PMU_RPS:-2}
+      PMU_PERIODE_COTES: ${PMU_PERIODE_COTES:-300}
+      PMU_FENETRE_COTES: ${PMU_FENETRE_COTES:-45}
+      PMU_MODELE: ${PMU_MODELE:-sans_marche}
+      MQTT_HOST: ${MQTT_HOST:-}
+      MQTT_PORT: ${MQTT_PORT:-1883}
+      MQTT_USER: ${MQTT_USER:-}
+      MQTT_PASSWORD: ${MQTT_PASSWORD:-}
+      MQTT_DISCOVERY_PREFIX: ${MQTT_DISCOVERY_PREFIX:-homeassistant}
+    volumes:
+      - pmu_data:/data          # cache HTTP + modèles entraînés
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: pmu-pronostics:0.1
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["uvicorn", "pmu.api:app", "--host", "0.0.0.0", "--port", "8100"]
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-pmu}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-pmu}
+      TZ: ${TZ:-Europe/Paris}
+      PMU_MODELE: ${PMU_MODELE:-sans_marche}
+    ports:
+      - "${API_PORT:-8100}:8100"
+    volumes:
+      - pmu_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8100/sante"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  pmu_db:
+  pmu_data:

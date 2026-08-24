@@ -1,0 +1,144 @@
+# Package Home Assistant — pilotage de la pile PMU depuis HA.
+#
+# Déposer dans /config/packages/pmu.yaml (l'inclusion
+# `packages: !include_dir_named packages` est déjà en place dans ta
+# configuration.yaml), puis Outils de développement → YAML →
+# « Recharger toute la configuration YAML ».
+#
+# ⚠️ Les entités sensor.pmu_* n'ont RIEN à déclarer ici : elles arrivent
+# toutes seules par découverte MQTT depuis le conteneur. Ce package
+# n'ajoute que ce que MQTT ne fournit pas — les commandes et l'alerte.
+#
+# Remplacer 192.168.1.42 par l'adresse de l'hôte Docker.
+
+rest_command:
+  pmu_recalculer:
+    url: "http://192.168.1.42:8100/ha/resume"
+    method: GET
+    timeout: 30
+
+  pmu_sante:
+    url: "http://192.168.1.42:8100/sante"
+    method: GET
+    timeout: 10
+
+script:
+  pmu_rafraichir:
+    alias: 🐎 PMU — recalculer les pronostics
+    icon: mdi:refresh
+    mode: single
+    sequence:
+      - action: rest_command.pmu_recalculer
+        continue_on_error: true
+      # La pile republie en MQTT dans la foulée ; on laisse le temps au
+      # message retenu d'arriver avant de rendre la main.
+      - delay: "00:00:05"
+      - action: persistent_notification.create
+        data:
+          title: Pronostics PMU
+          message: >
+            {{ states('sensor.pmu_courses') }} course(s) au programme.
+            Prochaine : {{ states('sensor.pmu_prochaine') }}.
+          notification_id: pmu_rafraichi
+
+automation:
+  # ── Alerte si la pile décroche ────────────────────────────────────
+  - id: pmu_alerte_pile
+    alias: 🐎 PMU — alerte pile hors service
+    description: >
+      binary_sensor.pmu_frais est en device_class « problem » : ON = les
+      pronostics ont plus de 24 h, donc le conteneur est arrêté ou la
+      collecte échoue. Deux heures de tolérance pour absorber un
+      redémarrage de l'hôte Docker.
+    mode: single
+    triggers:
+      - trigger: state
+        entity_id: binary_sensor.pmu_frais
+        to: "on"
+        for: "02:00:00"
+      - trigger: state
+        entity_id: binary_sensor.pmu_frais
+        to: "unavailable"
+        for: "02:00:00"
+    actions:
+      - action: telegram_bot.send_message
+        data:
+          target: 7136393185
+          title: "*🐎 Pile PMU hors service*"
+          message: >
+            Les pronostics ne sont plus à jour depuis
+            {{ states('sensor.pmu_age_calcul') }} h.
+
+            Vérifier sur l'hôte Docker :
+            `docker compose ps` puis `docker compose logs --tail 50 collecteur`.
+
+  # ── Résumé Telegram avant la première course ──────────────────────
+  - id: pmu_resume_telegram
+    alias: 🐎 PMU — résumé du jour sur Telegram
+    description: >
+      Envoie le programme et la sélection du modèle chaque midi.
+      Ne se déclenche que s'il y a effectivement des courses.
+    mode: single
+    triggers:
+      - trigger: time
+        at: "12:00:00"
+    conditions:
+      - condition: numeric_state
+        entity_id: sensor.pmu_courses
+        above: 0
+      - condition: state
+        entity_id: binary_sensor.pmu_frais
+        state: "off"
+    actions:
+      - action: telegram_bot.send_message
+        data:
+          target: 7136393185
+          title: "*🐎 Pronostics du jour*"
+          message: >
+            {% for c in state_attr('sensor.pmu_courses', 'programme') or [] -%}
+            {%- set t = c.selection[0] if c.selection else none %}
+            *{{ c.code }}* {{ c.hippodrome }} · {{ (c.depart | as_datetime | as_local).strftime('%H:%M') if c.depart else '—' }}
+            {% if t %}   {{ t.num }} {{ t.cheval }} — {{ (t.proba * 100) | round | int }} %{% if t.cote %} (cote {{ t.cote }}){% endif %}{% endif %}
+            {% endfor %}
+
+            _Probabilités calibrées. La cote reste celle du public :
+            un écart n'est pas un gain._
+
+  # ── Rappel avant le départ d'une course à forte confiance ─────────
+  - id: pmu_alerte_confiance
+    alias: 🐎 PMU — course à forte confiance
+    description: >
+      Prévient 10 min avant le départ quand le modèle détache nettement un
+      partant (écart au 2e choix supérieur à 12 points). Rare par
+      construction : c'est ce qui en fait un signal.
+    mode: single
+    max_exceeded: silent
+    triggers:
+      - trigger: state
+        entity_id: sensor.pmu_prochaine_depart
+    conditions:
+      - condition: numeric_state
+        entity_id: sensor.pmu_confiance
+        above: 12
+      - condition: template
+        value_template: >
+          {% set d = states('sensor.pmu_prochaine_depart') | as_datetime %}
+          {{ d is not none and 0 < (d - now()).total_seconds() < 900 }}
+        note: >
+          Aucune condition native ne sait comparer un horodatage d'attribut
+          à « dans moins de 15 minutes » ; le template est ici justifié.
+    actions:
+      - action: telegram_bot.send_message
+        data:
+          target: 7136393185
+          title: "*🐎 Course à forte confiance*"
+          message: >
+            {% set p = state_attr('sensor.pmu_courses', 'prochaine') %}
+            {{ p.code }} · {{ p.hippodrome }} — départ
+            {{ (p.depart | as_datetime | as_local).strftime('%H:%M') }}
+
+            {% for c in p.selection[:3] -%}
+            {{ loop.index }}. *{{ c.num }} {{ c.cheval }}* — {{ (c.proba * 100) | round(1) }} %{% if c.cote %} · cote {{ c.cote }}{% endif %}
+            {% endfor %}
+
+            Écart au 2ᵉ choix : {{ states('sensor.pmu_confiance') }} points.

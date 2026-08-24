@@ -1,0 +1,12 @@
+# Dépendances supplémentaires du conteneur (API, MQTT, entraînement rapide).
+# Séparées de requirements.txt pour que `scripts/demo.py` reste installable
+# en local sans tirer LightGBM ni un serveur web.
+-r requirements.txt
+
+fastapi>=0.115
+uvicorn[standard]>=0.32
+paho-mqtt>=2.1
+
+# Catégorielles natives, apprentissage de rang, nettement plus rapide que
+# scikit-learn sur ce type de données. train.py le détecte automatiquement.
+lightgbm>=4.3

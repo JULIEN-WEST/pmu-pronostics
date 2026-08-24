@@ -1,0 +1,17 @@
+# Socle — suffisant pour lancer scripts/demo.py et toute la suite de tests
+pandas>=2.2
+numpy>=1.26
+scikit-learn>=1.5
+requests>=2.31
+joblib>=1.4
+
+# Base de données (collecte réelle)
+psycopg[binary]>=3.2
+
+# Optionnel mais recommandé pour l'entraînement : catégorielles natives,
+# apprentissage de rang, et nettement plus rapide. train.py le détecte
+# automatiquement s'il est installé, et retombe sur scikit-learn sinon.
+# lightgbm>=4.3
+
+# Développement
+pytest>=8.0

@@ -1,0 +1,168 @@
+# Vue Lovelace « Pronostics PMU »
+#
+# À coller dans un tableau de bord en mode YAML (⋮ → Modifier → ⋮ →
+# Éditeur de configuration brut), à l'intérieur de `views:`.
+#
+# Aucune carte personnalisée n'est requise : tout est en cartes natives
+# (markdown, tuile, conditionnelle). Les barres de probabilité sont des
+# caractères de bloc, ce qui évite une dépendance à bar-card ou à
+# button-card et reste lisible sur mobile comme sur le NSPanel.
+#
+# Source unique : sensor.pmu_courses, dont les attributs portent toute la
+# journée. Publié par la pile Docker en découverte MQTT.
+
+- title: Pronostics
+  path: pronostics
+  icon: mdi:horse-variant
+  cards:
+
+    # ── Bandeau d'état ──────────────────────────────────────────────
+    - type: grid
+      columns: 4
+      square: false
+      cards:
+        - type: tile
+          entity: sensor.pmu_courses
+          name: Courses
+          icon: mdi:calendar-today
+        - type: tile
+          entity: sensor.pmu_confiance
+          name: Confiance
+          icon: mdi:gauge
+        - type: tile
+          entity: sensor.pmu_favori_proba
+          name: Favori
+          icon: mdi:trophy-outline
+        - type: tile
+          entity: sensor.pmu_age_calcul
+          name: Calculé il y a
+          icon: mdi:update
+
+    # ── Premier démarrage : la collecte tourne ──────────────────────
+    # Sans cette carte, la vue resterait vide une à deux heures au premier
+    # démarrage, et un écran vide ressemble à une panne.
+    - type: conditional
+      conditions:
+        - condition: state
+          entity: sensor.pmu_courses
+          state: "0"
+      card:
+        type: markdown
+        content: >
+          {% if state_attr('sensor.pmu_courses', 'amorcage') %}
+          ## ⏳ Première collecte en cours
+
+          {{ state_attr('sensor.pmu_courses', 'message') }}
+
+          Rien à faire : la vue se remplira toute seule.
+          {% else %}
+          ## Aucune course aujourd'hui
+
+          Soit le programme du jour est vide, soit la collecte n'a pas
+          encore tourné ce matin.
+          {% endif %}
+
+    # ── Alerte si la pile ne répond plus ────────────────────────────
+    # binary_sensor.pmu_frais est en device_class "problem" :
+    # 'on' = problème = pronostic périmé ou pile arrêtée.
+    - type: conditional
+      conditions:
+        - condition: state
+          entity: binary_sensor.pmu_frais
+          state: "on"
+      card:
+        type: markdown
+        content: >
+          ## ⚠️ Pronostics périmés
+
+          Le dernier calcul remonte à
+          **{{ states('sensor.pmu_age_calcul') }} h**.
+
+          La pile Docker est probablement arrêtée, ou la collecte échoue.
+          Vérifier `docker compose ps` et `docker compose logs collecteur`.
+
+    # ── Prochaine course ────────────────────────────────────────────
+    # Bloc littéral `|` et non plié `>` : une ligne de tableau markdown
+    # doit rester sur UNE ligne, et le pliage insérerait des espaces
+    # imprévisibles au milieu des expressions Jinja.
+    - type: markdown
+      content: |
+        {% set p = state_attr('sensor.pmu_courses', 'prochaine') %}
+        {%- if p %}
+        ## {{ p.code }} · {{ p.hippodrome }}
+
+        {{ p.libelle }}
+
+        {#- Le PMU renvoie les disciplines sans accent et en capitales. -#}
+        {%- set libelles = {'ATTELE': 'Attelé', 'MONTE': 'Monté', 'PLAT': 'Plat',
+                            'HAIES': 'Haies', 'STEEPLECHASE': 'Steeple', 'CROSS': 'Cross'} -%}
+        {{ libelles.get(p.discipline, p.discipline | title) }} · {{ p.distance }} m · {{ p.partants }} partants · départ {{ (p.depart | as_datetime | as_local).strftime('%H:%M') }}
+
+        | N° | Cheval | Probabilité | Cote | Valeur |
+        |---:|:-------|:------------|-----:|-------:|
+        {% for c in p.selection -%}
+        {#- Barre de 12 blocs. Les parenthèses autour du filtre sont
+            indispensables : `'█' * x | round` s'évalue en
+            `('█' * x) | round`, ce qui casse. -#}
+        {%- set n = ((c.proba | float(0)) * 24) | round | int -%}
+        {%- set n = 12 if n > 12 else n -%}
+        {%- set val = c.valeur | float(none) -%}
+        | **{{ c.num }}** | {{ c.cheval | truncate(18, true, '…') }} | `{{ '█' * n }}{{ '·' * (12 - n) }}` {{ ((c.proba | float(0)) * 100) | round(1) }} % | {{ c.cote if c.cote else '—' }} | {% if val is not none %}{% if val > 0.15 %}**+{{ (val * 100) | round | int }} %**{% else %}{{ (val * 100) | round | int }} %{% endif %}{% else %}—{% endif %} |
+        {% endfor %}
+        {% set ec = p.confiance | float(0) -%}
+        *Écart entre le 1ᵉʳ et le 2ᵉ choix : {{ (ec * 100) | round(1) }} points — confiance {{ 'élevée' if ec > 0.10 else 'moyenne' if ec > 0.05 else 'faible' }}.*
+        {%- else %}
+        ## Plus de course aujourd'hui
+
+        Le programme est terminé, ou la collecte n'a pas encore tourné.
+        {%- endif %}
+
+    # ── Programme du jour ───────────────────────────────────────────
+    - type: markdown
+      content: |
+        {% set jour = state_attr('sensor.pmu_courses', 'date') -%}
+        ## Programme du {{ (jour | as_datetime).strftime('%d/%m') if jour else '—' }}
+
+        | Course | Hippodrome | Départ | Sélection | Conf. | |
+        |:-------|:-----------|-------:|:----------|------:|:-|
+        {% for c in state_attr('sensor.pmu_courses', 'programme') or [] -%}
+        {%- set top = c.selection[0] if c.selection else none -%}
+        | **{{ c.code }}** | {{ c.hippodrome | truncate(16, true, '') }} | {{ (c.depart | as_datetime | as_local).strftime('%H:%M') if c.depart else '—' }} | {% if top %}{{ top.num }} · {{ top.cheval | truncate(16, true, '…') }} ({{ ((top.proba | float(0)) * 100) | round | int }} %){% else %}—{% endif %} | {{ ((c.confiance | float(0)) * 100) | round | int }} | {% if not top %}—{% elif not c.arrivee_connue %}⏳{% elif top.arrivee == 1 %}✅{% else %}❌{% endif %} |
+        {% endfor %}
+        *✅ le favori du modèle a gagné · ❌ non · ⏳ course à venir. Indicateur visuel seulement : un taux de réussite se lit sur plusieurs centaines de courses, pas sur une journée.*
+
+    # ── Ce que le modèle est et n'est pas ───────────────────────────
+    - type: markdown
+      content: >
+        ### Lecture
+
+        Les probabilités sont **calibrées** : quand le modèle annonce 20 %,
+        l'événement arrive environ une fois sur cinq. C'est ce que mesure
+        la colonne Confiance.
+
+        La colonne **Valeur** vaut `probabilité × cote − 1`. Positive, elle
+        signale un écart avec le marché — pas un pari gagnant. Le PMU est
+        un pari mutuel : le prélèvement est retiré avant répartition, donc
+        un écart doit dépasser ce prélèvement pour valoir quelque chose,
+        et se vérifier sur plusieurs centaines de courses.
+
+    # ── Diagnostics, repliés ────────────────────────────────────────
+    - type: entities
+      title: Pile PMU
+      show_header_toggle: false
+      entities:
+        - entity: binary_sensor.pmu_frais
+          name: État des pronostics
+        - entity: sensor.pmu_courses
+          name: Courses du jour
+        - entity: sensor.pmu_prochaine
+          name: Prochaine course
+        - entity: sensor.pmu_prochaine_depart
+          name: Départ
+        - entity: sensor.pmu_favori
+          name: Favori du modèle
+        - entity: sensor.pmu_age_calcul
+          name: Âge du calcul
+        - type: divider
+        - entity: script.pmu_rafraichir
+          name: Recalculer maintenant
