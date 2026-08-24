@@ -115,44 +115,97 @@ def test_place_from_ordre_arrivee_liste_plate():
 # Participant
 # ---------------------------------------------------------------------
 
+# Reproduit fidèlement la réponse observée sur
+# /programme/22082026/R1/C1/participants — y compris les champs qui
+# ressemblent à du texte mais sont des OBJETS.
 PARTICIPANT = {
-    "numPmu": 6,
-    "idCheval": 8123456,
-    "nom": "LE BON TEMPS ROULE",
-    "age": 2,
-    "sexe": "MALES",
-    "race": "PUR SANG",
-    "nomPere": "SIYOUNI",
-    "nomMere": "WOOT WOOT",
-    "nomPereMere": "DUBAWI",
-    "driver": "M.BARZALONA",
-    "entraineur": "A. FABRE",
+    "numPmu": 1,
+    # ⚠️ Chaîne composée nom-mère-père, pas un entier.
+    "idCheval": "KHAMEPHIS GAME-AKITA-ZARAK",
+    "nom": "KHAMEPHIS GAME",
+    "age": 6,
+    "sexe": "HONGRES",
+    "race": "PUR-SANG",
+    "pays": "France",
+    "nomPere": "ZARAK",
+    "nomMere": "AKITA",
+    "nomPereMere": "GIANT'S CAUSEWAY",
+    "eleveur": "ECURIE HARAS DU CHATEAU",
+    "proprietaire": "ECURIE HARAS DU CHATEAU",
+    "driver": "M. PROTTI",
+    "entraineur": "M.BRASME (S)",
+    "driverChange": True,
     "placeCorde": 6,
-    "musique": "2p 1p 4p",
-    "nombreCourses": 3,
-    "nombreVictoires": 1,
+    "handicapPoids": 595,
+    "handicapValeur": 32.0,
+    "oeilleres": "SANS_OEILLERES",
+    "musique": "0p1p0p(25)4p1p1p3p9p0p",
+    "nombreCourses": 24,
+    "nombreVictoires": 4,
+    "nombrePlaces": 12,
     "gainsParticipant": {"gainsCarriere": 1753600, "gainsAnneeEnCours": 1753600},
     "dernierRapportDirect": {
         "typePari": "SIMPLE_GAGNANT",
-        "rapport": 5.5,
+        "rapport": 12.0,
         "favoris": True,
         "dateRapport": 1787515200000,
         "nombreIndicateurTendance": -2,
     },
     "statut": "PARTANT",
-    "robe": {"libelleCourt": "BAI"},
+    "ordreArrivee": 2,
+    "allure": "GALOP",
+    # Les trois pièges : ce sont des objets.
+    "robe": {"code": "001", "libelleCourt": "ALEZAN", "libelleLong": "ALEZAN"},
+    "commentaireApresCourse": {"texte": "A pris un bon départ.", "source": "PMU"},
+    "distanceChevalPrecedent": {"libelleCourt": "1/2 L", "libelleLong": "une demi-longueur",
+                                "code": 3, "identifiant": "DEMI_LONGUEUR"},
 }
 
 
 def test_parse_participant_champs_cles():
-    row = nz.parse_participant(PARTICIPANT, ordre_arrivee=[[6], [3]])
-    assert row["num_pmu"] == 6
-    assert row["id_cheval"] == 8123456
-    assert row["driver"] == "M.BARZALONA"
-    assert row["nom_pere"] == "SIYOUNI"
+    row = nz.parse_participant(PARTICIPANT)
+    assert row["num_pmu"] == 1
+    assert row["driver"] == "M. PROTTI"
+    assert row["nom_pere"] == "ZARAK"
     assert row["gains_carriere"] == 17536.0     # centimes → euros
-    assert row["ordre_arrivee"] == 1            # déduit de ordreArrivee
-    assert row["robe"] == "BAI"
+    assert row["ordre_arrivee"] == 2
+    assert row["robe"] == "ALEZAN"
+
+
+def test_id_cheval_reste_une_chaine():
+    """
+    Le PMU compose l'identifiant à partir du nom, de la mère et du père.
+    Le convertir en entier donne None : plus aucun cheval en base, plus
+    aucune généalogie, plus aucune performance importée — et pas la
+    moindre erreur pour le signaler.
+    """
+    row = nz.parse_participant(PARTICIPANT)
+    assert row["id_cheval"] == "KHAMEPHIS GAME-AKITA-ZARAK"
+    assert isinstance(row["id_cheval"], str)
+
+
+@pytest.mark.parametrize("champ, attendu", [
+    ("commentaire_apres_course", "A pris un bon départ."),
+    ("distance_cheval_precedent", "une demi-longueur"),
+    ("robe", "ALEZAN"),
+])
+def test_les_champs_objets_sont_aplatis(champ, attendu):
+    """
+    Passer un dict à psycopg pour une colonne `text` lève « cannot adapt
+    type dict ». L'exception remontant au milieu d'une transaction, c'est
+    toute la journée de collecte qui est perdue, pas la seule ligne.
+    """
+    row = nz.parse_participant(PARTICIPANT)
+    assert row[champ] == attendu
+    assert isinstance(row[champ], str)
+
+
+def test_aucun_champ_n_est_un_conteneur():
+    """Filet général : rien de ce qui part en base ne doit être dict/list."""
+    row = nz.parse_participant(PARTICIPANT)
+    fautifs = {k: type(v).__name__ for k, v in row.items()
+               if isinstance(v, (dict, list, tuple, set))}
+    assert not fautifs, f"champs non aplatis : {fautifs}"
 
 
 def test_parse_participant_sur_dict_vide():
@@ -175,7 +228,7 @@ def test_parse_cotes():
     assert len(cotes) == 1
     c = cotes[0]
     assert c["type_pari"] == "SIMPLE_GAGNANT"
-    assert c["rapport"] == 5.5
+    assert c["rapport"] == 12.0
     assert c["favoris"] is True
     # dateRapport prime sur l'heure de notre appel
     assert c["releve_le"] != releve
@@ -222,9 +275,11 @@ def test_parse_course_sur_dict_vide():
 # Performances détaillées
 # ---------------------------------------------------------------------
 
+# Forme réelle de /performances-detaillees/pretty : les blocs sont
+# identifiés par numPmu et nomCheval — il n'y a PAS d'idCheval.
 PERF = {
-    "idCheval": 8123456,
-    "nomCheval": "LE BON TEMPS ROULE",
+    "numPmu": 1,
+    "nomCheval": "KHAMEPHIS GAME",
     "coursesCourues": [
         {
             "date": 1785000000000,
@@ -234,30 +289,49 @@ PERF = {
             "distance": 1600,
             "allocation": 2700000,
             "nbParticipants": 12,
-            "place": {"place": 2, "statusArrivee": "PLACE"},
+            "place": {"place": 2, "rawValue": "2", "statusArrivee": "PLACE"},
             "etatTerrain": "BON",
             "tempsDuPremier": 96400,
             "participants": [
-                {"idCheval": 8123456, "nomJockey": "M.BARZALONA", "corde": 6, "poidsJockey": 56.0},
-                {"idCheval": 999, "nomJockey": "AUTRE"},
+                {"numPmu": 4, "nomCheval": "AUTRE", "nomJockey": "AUTRE", "itsHim": False},
+                {"numPmu": 1, "nomCheval": "KHAMEPHIS GAME", "nomJockey": "M. PROTTI",
+                 "corde": 6, "poidsJockey": 56.0, "itsHim": True,
+                 "distanceAvecPrecedent": {"libelleLong": "une encolure"}},
             ],
         },
         {"date": None, "hippodrome": "SANS DATE"},  # doit être écartée
     ],
 }
 
+ID = "KHAMEPHIS GAME-AKITA-ZARAK"
+
 
 def test_parse_performances():
-    lignes = nz.parse_performances(PERF)
+    lignes = nz.parse_performances(PERF, ID)
     assert len(lignes) == 1              # la ligne sans date est écartée
     l = lignes[0]
-    assert l["id_cheval"] == 8123456
+    assert l["id_cheval"] == ID
     assert l["place"] == 2
-    assert l["nom_jockey"] == "M.BARZALONA"   # pris sur LE bon participant
+    assert l["nom_jockey"] == "M. PROTTI"     # pris sur LE bon participant
     assert l["corde"] == 6
     assert l["allocation"] == 27000.0
     assert l["date_course"] == date(2026, 7, 25)
+    assert l["distance_avec_precedent"] == "une encolure"
 
 
-def test_parse_performances_sans_id_cheval():
-    assert nz.parse_performances({"coursesCourues": [{"date": 1785000000000}]}) == []
+def test_parse_performances_identifie_le_cheval_par_itshim():
+    """
+    Aucun identifiant dans `coursesCourues[].participants[]` : le seul
+    repère fiable est le drapeau `itsHim`. S'en remettre à l'ordre des
+    éléments rattacherait les performances au mauvais cheval.
+    """
+    lignes = nz.parse_performances(PERF, ID)
+    assert lignes[0]["nom_jockey"] != "AUTRE"
+
+
+def test_parse_performances_sans_identifiant_fourni():
+    """
+    Le bloc ne porte pas d'idCheval : sans identifiant passé par
+    l'appelant, on ne produit rien plutôt que des lignes orphelines.
+    """
+    assert nz.parse_performances(PERF) == []

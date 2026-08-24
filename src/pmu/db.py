@@ -33,9 +33,55 @@ def connect(dsn: str | None = None):
 
 
 def apply_schema(conn, path: str = "sql/001_schema.sql") -> None:
+    # La vérification passe AVANT l'application : sur une base à l'ancien
+    # format, le script échouerait d'abord sur un index, avec un message
+    # incompréhensible (« column nom_norme does not exist ») qui n'aide
+    # personne à comprendre qu'il faut recréer le volume.
+    _verifier_schema(conn)
     with open(path, encoding="utf-8") as fh:
         conn.execute(fh.read())
     conn.commit()
+
+
+def _verifier_schema(conn) -> None:
+    """
+    Garde-fou de migration.
+
+    Le schéma s'applique avec `CREATE TABLE IF NOT EXISTS` : une base
+    créée par une version antérieure n'est donc PAS modifiée. Or
+    `cheval.id_cheval` est passé de `bigint` à `text` — le PMU renvoie
+    « KHAMEPHIS GAME-AKITA-ZARAK », pas un nombre.
+
+    Sur une base restée en `bigint`, l'insertion échouerait partant après
+    partant, en silence relatif. Mieux vaut refuser de démarrer avec un
+    message qui dit exactement quoi faire.
+    """
+    row = conn.execute(
+        """
+        SELECT data_type FROM information_schema.columns
+         WHERE table_schema = 'pmu' AND table_name = 'cheval'
+           AND column_name = 'id_cheval'
+        """
+    ).fetchone()
+    if row and row["data_type"] not in ("text", "character varying"):
+        raise RuntimeError(
+            "\n"
+            "╔══════════════════════════════════════════════════════════════╗\n"
+            "║  BASE DE DONNEES OBSOLETE                                    ║\n"
+            "╠══════════════════════════════════════════════════════════════╣\n"
+            "║  cheval.id_cheval est en '%-10s' au lieu de 'text'.     ║\n"
+            "║                                                              ║\n"
+            "║  L'API PMU renvoie un identifiant TEXTE                      ║\n"
+            "║  (« KHAMEPHIS GAME-AKITA-ZARAK »), pas un nombre.            ║\n"
+            "║                                                              ║\n"
+            "║  A FAIRE dans Portainer :                                    ║\n"
+            "║    1. Stacks -> pmu -> Delete this stack                     ║\n"
+            "║       en cochant « Remove volumes »                          ║\n"
+            "║    2. Recreer la stack (les donnees actuelles sont vides,    ║\n"
+            "║       il n'y a rien a sauvegarder)                           ║\n"
+            "╚══════════════════════════════════════════════════════════════╝"
+            % row["data_type"][:10]
+        )
 
 
 # ---------------------------------------------------------------------

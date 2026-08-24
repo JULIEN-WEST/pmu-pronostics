@@ -91,7 +91,9 @@ def _semer(conn, n_courses: int = 300) -> pd.DataFrame:
 
         for r in grp.itertuples():
             p = {
-                "id_cheval": int(r.id_cheval), "nom_cheval": f"CHEVAL {r.id_cheval}",
+                # Identifiant TEXTE, comme le PMU : nom-mère-père.
+                "id_cheval": f"CHEVAL {r.id_cheval}-{r.nom_pere_mere}-{r.nom_pere}",
+                "nom_cheval": f"CHEVAL {r.id_cheval}",
                 "sexe": r.sexe, "race": "TROTTEUR FRANCAIS", "pays": "FR",
                 "nom_pere": r.nom_pere, "nom_mere": None, "nom_pere_mere": r.nom_pere_mere,
                 "num_pmu": int(r.num_pmu), "age": int(r.age),
@@ -290,6 +292,88 @@ def test_pronostic_et_relecture(base):
     # intra-course, et c'est ce qui rend le classement lisible.
     total = sum(s["proba"] for s in c["selection"])
     assert 0.97 <= total <= 1.03, f"somme des probabilités = {total}"
+
+
+def test_insertion_d_un_participant_reel(base):
+    """
+    LE test qui manquait.
+
+    Toute la suite s'appuyait sur des fixtures que j'avais inventées, avec
+    un `idCheval` entier et des champs texte bien sages. La vraie API
+    renvoie un identifiant en CHAÎNE et trois champs en OBJET. Résultat :
+    tests au vert, collecte à zéro partant en production, et pas une seule
+    erreur pour le signaler.
+
+    Ce test part de la charge utile réellement observée sur
+    /programme/22082026/R1/C1/participants et la fait traverser toute la
+    chaîne jusqu'à l'insertion.
+    """
+    from pmu import normalize as nz
+
+    reel = {
+        "numPmu": 1,
+        "idCheval": "KHAMEPHIS GAME-AKITA-ZARAK",   # chaîne, pas entier
+        "nom": "KHAMEPHIS GAME",
+        "pays": "France",
+        "age": 6, "sexe": "HONGRES", "race": "PUR-SANG", "statut": "PARTANT",
+        "placeCorde": 6, "oeilleres": "SANS_OEILLERES",
+        "proprietaire": "ECURIE HARAS DU CHATEAU",
+        "entraineur": "M.BRASME (S)", "driver": "M. PROTTI",
+        "driverChange": True, "indicateurInedit": False,
+        "musique": "0p1p0p(25)4p1p1p3p9p0p",
+        "nombreCourses": 24, "nombreVictoires": 4, "nombrePlaces": 12,
+        "nombrePlacesSecond": 1, "nombrePlacesTroisieme": 4,
+        "gainsParticipant": {"gainsCarriere": 3820000, "gainsVictoires": 1500000,
+                             "gainsPlace": 900000, "gainsAnneeEnCours": 720000,
+                             "gainsAnneePrecedente": 640000},
+        "handicapValeur": 32.0, "handicapPoids": 595,
+        "poidsConditionMonte": 580, "poidsConditionMonteChange": True,
+        "nomPere": "ZARAK", "nomMere": "AKITA", "nomPereMere": "GIANT'S CAUSEWAY",
+        "ordreArrivee": 2, "jumentPleine": False, "engagement": False,
+        "supplement": 0, "eleveur": "ECURIE HARAS DU CHATEAU", "allure": "GALOP",
+        # Les trois objets déguisés en texte
+        "robe": {"code": "001", "libelleCourt": "ALEZAN", "libelleLong": "ALEZAN"},
+        "commentaireApresCourse": {"texte": "Bien placé, a fini fort.", "source": "PMU"},
+        "distanceChevalPrecedent": {"libelleCourt": "1/2 L",
+                                    "libelleLong": "une demi-longueur",
+                                    "code": 3, "identifiant": "DEMI_LONGUEUR"},
+        "dernierRapportDirect": {"typePari": "SIMPLE_GAGNANT", "rapport": 12.0,
+                                 "favoris": True, "dateRapport": 1787515200000,
+                                 "nombreIndicateurTendance": -2, "grossePrise": False},
+    }
+
+    row = base.execute("SELECT course_id FROM course LIMIT 1").fetchone()
+    course_id = row["course_id"]
+
+    p = nz.parse_participant(reel)
+    assert p["id_cheval"] == "KHAMEPHIS GAME-AKITA-ZARAK"
+
+    id_d = db.upsert_personne(base, p["driver"], nz.norm_person(p["driver"]))
+    id_e = db.upsert_personne(base, p["entraineur"], nz.norm_person(p["entraineur"]))
+    db.upsert_cheval(base, p)
+    # num_pmu 1 existe déjà dans la course : on décale pour ne pas écraser.
+    p["num_pmu"] = 99
+    db.upsert_partant(base, course_id, p, id_d, id_e, None)
+    db.insert_cotes(base, course_id, nz.parse_cotes(reel, datetime.now(timezone.utc)))
+    base.commit()
+
+    stocke = base.execute(
+        """
+        SELECT p.id_cheval, p.commentaire_apres_course, p.distance_cheval_precedent,
+               p.gains_carriere, p.ordre_arrivee, c.nom, c.nom_pere_mere
+          FROM partant p JOIN cheval c ON c.id_cheval = p.id_cheval
+         WHERE p.course_id = %s AND p.num_pmu = 99
+        """,
+        (course_id,),
+    ).fetchone()
+
+    assert stocke is not None, "le partant réel n'a pas été inséré"
+    assert stocke["id_cheval"] == "KHAMEPHIS GAME-AKITA-ZARAK"
+    assert stocke["commentaire_apres_course"] == "Bien placé, a fini fort."
+    assert stocke["distance_cheval_precedent"] == "une demi-longueur"
+    assert float(stocke["gains_carriere"]) == 38200.0
+    assert stocke["ordre_arrivee"] == 2
+    assert stocke["nom_pere_mere"] == "GIANT S CAUSEWAY"   # normalisé
 
 
 def test_api_sert_la_charge_utile_ha(base):

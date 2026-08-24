@@ -36,7 +36,10 @@ CREATE TABLE IF NOT EXISTS personne (
 );
 
 CREATE TABLE IF NOT EXISTS cheval (
-    id_cheval       bigint PRIMARY KEY,        -- idCheval, identifiant PMU
+    -- ⚠️ TEXTE, pas un entier. Le PMU compose l'identifiant à partir du
+    -- nom, de la mère et du père : « KHAMEPHIS GAME-AKITA-ZARAK ».
+    -- C'est stable, unique, et lisible — mais ce n'est pas un nombre.
+    id_cheval       text PRIMARY KEY,
     nom             text NOT NULL,
     nom_norme       text NOT NULL,
     sexe            text,                      -- MALES / FEMELLES / HONGRES
@@ -49,9 +52,9 @@ CREATE TABLE IF NOT EXISTS cheval (
     nom_mere        text,
     nom_pere_mere   text,
     -- Résolution vers de vrais identifiants quand IFCE / LeTrot la permettent.
-    id_pere         bigint REFERENCES cheval (id_cheval),
-    id_mere         bigint REFERENCES cheval (id_cheval),
-    id_pere_mere    bigint REFERENCES cheval (id_cheval),
+    id_pere         text REFERENCES cheval (id_cheval),
+    id_mere         text REFERENCES cheval (id_cheval),
+    id_pere_mere    text REFERENCES cheval (id_cheval),
 
     id_eleveur      bigint REFERENCES personne (id),
     -- Rattachement aux sources externes
@@ -121,7 +124,7 @@ CREATE INDEX IF NOT EXISTS idx_course_discipline  ON course (discipline, heure_d
 CREATE TABLE IF NOT EXISTS partant (
     course_id       bigint  NOT NULL REFERENCES course (course_id) ON DELETE CASCADE,
     num_pmu         smallint NOT NULL,
-    id_cheval       bigint  REFERENCES cheval (id_cheval),
+    id_cheval       text    REFERENCES cheval (id_cheval),
 
     -- Identité au moment de la course (l'âge change, pas le cheval)
     age             smallint,
@@ -224,7 +227,7 @@ CREATE TABLE IF NOT EXISTS rapport_definitif (
 -- pour la même course (cf. vue v_historique_cheval).
 CREATE TABLE IF NOT EXISTS performance_passee (
     id              bigserial PRIMARY KEY,
-    id_cheval       bigint NOT NULL REFERENCES cheval (id_cheval),
+    id_cheval       text   NOT NULL REFERENCES cheval (id_cheval),
     date_course     date   NOT NULL,
     hippodrome_lib  text,
     hippodrome_code text,

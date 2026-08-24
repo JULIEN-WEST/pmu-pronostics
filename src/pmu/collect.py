@@ -49,7 +49,7 @@ def collecte_course(
 ) -> dict:
     """Partants + cotes + performances passées d'une course. Renvoie un compte."""
     cle = f"{client.fmt_date(jour)}/R{num_r}/C{num_c}"
-    stats = {"partants": 0, "cotes": 0, "perfs": 0}
+    stats = {"partants": 0, "cotes": 0, "perfs": 0, "ignores": 0}
     releve_le = datetime.now(timezone.utc)
 
     try:
@@ -61,16 +61,33 @@ def collecte_course(
         db.journal(conn, "participants", cle, "ERREUR", None, str(exc))
         return stats
 
+    # numPmu → idCheval, pour rattacher les performances passées : l'endpoint
+    # performances-detaillees n'expose PAS idCheval, seulement numPmu.
+    id_par_num: dict[int, str] = {}
+
     for raw in participants:
         p = nz.parse_participant(raw, ordre_arrivee)
         if p["num_pmu"] is None:
             continue
-        id_driver, id_entr, id_prop, id_elev = _personnes(conn, p)
-        db.upsert_cheval(conn, p, id_eleveur=id_elev)
-        db.upsert_partant(conn, course_id, p, id_driver, id_entr, id_prop)
-        db.insert_cotes(conn, course_id, nz.parse_cotes(raw, releve_le))
+        cotes = nz.parse_cotes(raw, releve_le)
+        try:
+            # Point de reprise par partant : une ligne malformée est
+            # écartée sans emporter la course entière ni laisser la
+            # transaction en échec. Sans ça, un seul champ inattendu
+            # coûte une journée de collecte.
+            with conn.transaction():
+                id_driver, id_entr, id_prop, id_elev = _personnes(conn, p)
+                db.upsert_cheval(conn, p, id_eleveur=id_elev)
+                db.upsert_partant(conn, course_id, p, id_driver, id_entr, id_prop)
+                db.insert_cotes(conn, course_id, cotes)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("partant %s de %s ignoré : %s", p["num_pmu"], cle, exc)
+            stats["ignores"] += 1
+            continue
+        if p["id_cheval"]:
+            id_par_num[p["num_pmu"]] = p["id_cheval"]
         stats["partants"] += 1
-        stats["cotes"] += len(nz.parse_cotes(raw, releve_le))
+        stats["cotes"] += len(cotes)
 
     db.journal(conn, "participants", cle, "OK", 200)
 
@@ -80,9 +97,17 @@ def collecte_course(
         except (PmuNotFound, PmuError) as exc:
             db.journal(conn, "perf", cle, "VIDE", None, str(exc))
         else:
-            lignes = [l for bloc in blocs for l in nz.parse_performances(bloc)]
-            stats["perfs"] = db.insert_performances(conn, lignes)
-            db.journal(conn, "perf", cle, "OK", 200)
+            lignes = []
+            for bloc in blocs:
+                num = nz.as_int(bloc.get("numPmu"))
+                lignes += nz.parse_performances(bloc, id_par_num.get(num))
+            try:
+                with conn.transaction():
+                    stats["perfs"] = db.insert_performances(conn, lignes)
+                db.journal(conn, "perf", cle, "OK", 200)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("performances de %s ignorées : %s", cle, exc)
+                db.journal(conn, "perf", cle, "ERREUR", None, str(exc))
 
     return stats
 
@@ -90,7 +115,8 @@ def collecte_course(
 def collecte_jour(conn, client: PmuClient, jour: date, *, avec_perfs: bool = True,
                   force: bool = False) -> dict:
     cle_jour = client.fmt_date(jour)
-    total = {"reunions": 0, "courses": 0, "partants": 0, "cotes": 0, "perfs": 0}
+    total = {"reunions": 0, "courses": 0, "partants": 0, "cotes": 0,
+             "perfs": 0, "ignores": 0}
 
     try:
         # Le programme se recharge toujours : les arrivées et les statuts
@@ -145,8 +171,9 @@ def collecte_jour(conn, client: PmuClient, jour: date, *, avec_perfs: bool = Tru
     db.journal(conn, "programme", cle_jour, "OK", 200)
     conn.commit()
     log.info(
-        "%s — %d réunions, %d courses, %d partants, %d perfs importées",
+        "%s — %d réunions, %d courses, %d partants, %d perfs importées%s",
         jour, total["reunions"], total["courses"], total["partants"], total["perfs"],
+        f", {total['ignores']} partants ignorés" if total["ignores"] else "",
     )
     return total
 

@@ -185,6 +185,11 @@ def amorcer(conn, client: PmuClient) -> None:
             try:
                 collect.collecte_jour(conn, client, jour, avec_perfs=True)
             except Exception:  # noqa: BLE001
+                # Le rollback n'est pas optionnel : après une erreur SQL,
+                # psycopg refuse toute instruction suivante tant que la
+                # transaction n'est pas annulée. Sans lui, un échec sur un
+                # jour condamne silencieusement tous les jours suivants.
+                conn.rollback()
                 _sur(f"collecte du {jour} en échec, on continue")
         jour -= timedelta(days=1)
 

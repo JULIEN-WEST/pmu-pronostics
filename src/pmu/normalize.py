@@ -12,6 +12,7 @@ fois, ici, pour ne plus jamais avoir à y penser en aval.
 
 from __future__ import annotations
 
+import json
 import re
 import unicodedata
 from datetime import date, datetime, timezone
@@ -96,6 +97,58 @@ def as_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def as_texte(value: Any) -> str | None:
+    """
+    Ramène n'importe quelle valeur à du texte insérable en base.
+
+    Indispensable : plusieurs champs que l'on croirait textuels sont en
+    réalité des objets côté PMU —
+
+        commentaireApresCourse   {"texte": "...", "source": "..."}
+        distanceChevalPrecedent  {"libelleCourt": "1/2 L", "code": 3, ...}
+        robe                     {"code": "001", "libelleLong": "ALEZAN"}
+
+    Passer un dict à psycopg pour une colonne `text` lève
+    « cannot adapt type dict », l'insertion casse, et comme l'exception
+    remonte au milieu d'une transaction, TOUTE la journée de collecte est
+    perdue — pas seulement la ligne fautive.
+
+    On extrait donc le libellé utile, et à défaut on sérialise plutôt que
+    de laisser passer un objet.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value.strip() or None
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, dict):
+        for cle in ("texte", "libelleLong", "libelleCourt", "libelle", "valeur", "code"):
+            v = value.get(cle)
+            if isinstance(v, str) and v.strip():
+                return v.strip()
+        return json.dumps(value, ensure_ascii=False)[:500] or None
+    if isinstance(value, (list, tuple)):
+        morceaux = [as_texte(v) for v in value]
+        return " | ".join([m for m in morceaux if m]) or None
+    return str(value)
+
+
+def as_id(value: Any) -> str | None:
+    """
+    Identifiant de cheval.
+
+    ⚠️ `idCheval` N'EST PAS UN NOMBRE. Le PMU renvoie une chaîne composée
+    du nom, de la mère et du père : « KHAMEPHIS GAME-AKITA-ZARAK ».
+    C'est stable et unique — mais le convertir en entier donne None, et
+    tout le fil généalogique s'effondre en silence.
+    """
+    t = as_texte(value)
+    return t if t else None
 
 
 def dig(obj: Any, *path: str, default: Any = None) -> Any:
@@ -264,21 +317,21 @@ def parse_participant(p: dict, ordre_arrivee: Any = None) -> dict:
 
     return {
         "num_pmu": num_pmu,
-        "id_cheval": as_int(p.get("idCheval")),
-        "nom_cheval": p.get("nom"),
+        "id_cheval": as_id(p.get("idCheval")),
+        "nom_cheval": as_texte(p.get("nom")),
         "age": as_int(p.get("age")),
-        "sexe": p.get("sexe"),
-        "race": p.get("race"),
-        "pays": p.get("pays"),
+        "sexe": as_texte(p.get("sexe")),
+        "race": as_texte(p.get("race")),
+        "pays": as_texte(p.get("pays")),
         # Généalogie : des noms, pas des identifiants.
-        "nom_pere": p.get("nomPere"),
-        "nom_mere": p.get("nomMere"),
-        "nom_pere_mere": p.get("nomPereMere"),
-        "eleveur": p.get("eleveur"),
+        "nom_pere": as_texte(p.get("nomPere")),
+        "nom_mere": as_texte(p.get("nomMere")),
+        "nom_pere_mere": as_texte(p.get("nomPereMere")),
+        "eleveur": as_texte(p.get("eleveur")),
         # Personnel
-        "driver": p.get("driver") or p.get("jockey"),
-        "entraineur": p.get("entraineur"),
-        "proprietaire": p.get("proprietaire"),
+        "driver": as_texte(p.get("driver") or p.get("jockey")),
+        "entraineur": as_texte(p.get("entraineur")),
+        "proprietaire": as_texte(p.get("proprietaire")),
         "driver_change": p.get("driverChange"),
         # Conditions
         "place_corde": as_int(p.get("placeCorde")),
@@ -287,16 +340,16 @@ def parse_participant(p: dict, ordre_arrivee: Any = None) -> dict:
         "handicap_distance": as_int(p.get("handicapDistance")),
         "poids_condition_monte": as_float(p.get("poidsConditionMonteChange"))
         or as_float(p.get("poidsConditionMonte")),
-        "oeilleres": p.get("oeilleres"),
-        "deferre": p.get("deferre"),
+        "oeilleres": as_texte(p.get("oeilleres")),
+        "deferre": as_texte(p.get("deferre")),
         "supplement": cents_to_eur(p.get("supplement")),
         "engagement": p.get("engagement"),
         "jument_pleine": p.get("jumentPleine"),
         "indicateur_inedit": p.get("indicateurInedit"),
-        "allure": p.get("allure"),
-        "robe": dig(p, "robe", "libelleCourt"),
+        "allure": as_texte(p.get("allure")),
+        "robe": as_texte(p.get("robe")),
         # Palmarès déclaré (connu avant le départ → utilisable en feature)
-        "musique": p.get("musique"),
+        "musique": as_texte(p.get("musique")),
         "nombre_courses": as_int(p.get("nombreCourses")),
         "nombre_victoires": as_int(p.get("nombreVictoires")),
         "nombre_places": as_int(p.get("nombrePlaces")),
@@ -308,13 +361,14 @@ def parse_participant(p: dict, ordre_arrivee: Any = None) -> dict:
         "gains_annee_en_cours": cents_to_eur(dig(p, "gainsParticipant", "gainsAnneeEnCours")),
         "gains_annee_precedente": cents_to_eur(dig(p, "gainsParticipant", "gainsAnneePrecedente")),
         # Résultat
-        "statut": p.get("statut"),
+        "statut": as_texte(p.get("statut")),
         "ordre_arrivee": place,
-        "statut_arrivee": p.get("statutArrivee"),
+        "statut_arrivee": as_texte(p.get("statutArrivee")),
         "temps_officiel_ms": as_int(p.get("tempsObtenu")),
         "reduction_km_ms": as_int(p.get("reductionKilometrique")),
-        "distance_cheval_precedent": p.get("distanceChevalPrecedent"),
-        "commentaire_apres_course": p.get("commentaireApresCourse"),
+        # Ces deux-là sont des OBJETS côté PMU, pas des chaînes.
+        "distance_cheval_precedent": as_texte(p.get("distanceChevalPrecedent")),
+        "commentaire_apres_course": as_texte(p.get("commentaireApresCourse")),
     }
 
 
@@ -351,53 +405,68 @@ def parse_cotes(p: dict, releve_le: datetime) -> list[dict]:
 # Performances détaillées
 # ---------------------------------------------------------------------
 
-def parse_performances(bloc: dict) -> list[dict]:
+def parse_performances(bloc: dict, id_cheval: str | None = None) -> list[dict]:
     """
-    Un bloc = un participant du jour + ses `coursesCourues` passées.
+    Un bloc = un partant du jour + ses `coursesCourues` passées.
     Renvoie une ligne par course passée.
+
+    ⚠️ Les blocs de cet endpoint sont identifiés par `numPmu` et
+    `nomCheval` — PAS par `idCheval`, qui n'y figure pas. L'appelant doit
+    donc fournir l'identifiant, résolu depuis l'appel `participants` de la
+    même course (cf. collect.collecte_course). Sans ça on obtient zéro
+    ligne, sans la moindre erreur.
     """
-    id_cheval = as_int(bloc.get("idCheval"))
-    if id_cheval is None:
+    id_cheval = id_cheval or as_id(bloc.get("idCheval"))
+    if not id_cheval:
         return []
 
+    # Dans `coursesCourues[].participants[]`, le cheval concerné se
+    # reconnaît au drapeau `itsHim` — le seul repère fiable, puisque les
+    # identifiants n'y sont pas.
     lignes = []
     for c in bloc.get("coursesCourues") or []:
         if not isinstance(c, dict):
             continue
         place_obj = c.get("place") if isinstance(c.get("place"), dict) else {}
-        # participants[] porte parfois le détail du cheval concerné
-        detail = {}
+
+        detail: dict = {}
         for part in c.get("participants") or []:
-            if isinstance(part, dict) and as_int(part.get("idCheval")) == id_cheval:
+            if not isinstance(part, dict):
+                continue
+            if part.get("itsHim") is True:
                 detail = part
                 break
+            if as_texte(part.get("nomCheval")) == as_texte(bloc.get("nomCheval")):
+                detail = part
 
         lignes.append(
             {
                 "id_cheval": id_cheval,
                 "date_course": ms_to_date(c.get("date")),
-                "hippodrome_lib": c.get("hippodrome"),
-                "hippodrome_code": c.get("codeHippodrome"),
-                "nom_prix": c.get("nomPrix"),
-                "discipline": c.get("discipline"),
-                "specialite": c.get("specialite"),
+                "hippodrome_lib": as_texte(c.get("hippodrome")),
+                "hippodrome_code": as_texte(c.get("codeHippodrome")),
+                "nom_prix": as_texte(c.get("nomPrix")),
+                "discipline": as_texte(c.get("discipline")),
+                "specialite": as_texte(c.get("specialite")),
                 "distance": as_int(c.get("distance")),
                 "allocation": cents_to_eur(c.get("allocation")),
                 "nb_participants": as_int(c.get("nbParticipants")),
                 "place": as_int(place_obj.get("place")),
-                "statut_arrivee": place_obj.get("statusArrivee"),
+                "statut_arrivee": as_texte(place_obj.get("statusArrivee")),
                 "corde": as_int(detail.get("corde") or c.get("corde")),
                 "poids_jockey": as_float(detail.get("poidsJockey") or c.get("poidsJockey")),
-                "nom_jockey": detail.get("nomJockey") or c.get("nomJockey"),
-                "oeillere": detail.get("oeillere") or c.get("oeillere"),
-                "deferre": detail.get("deferre") or c.get("deferre"),
-                "etat_terrain": c.get("etatTerrain"),
+                "nom_jockey": as_texte(detail.get("nomJockey") or c.get("nomJockey")),
+                "oeillere": as_texte(detail.get("oeillere") or c.get("oeillere")),
+                "deferre": as_texte(detail.get("deferre") or c.get("deferre")),
+                "etat_terrain": as_texte(c.get("etatTerrain")),
                 "temps_premier_ms": as_int(c.get("tempsDuPremier")),
                 "reduction_km_ms": as_int(
                     detail.get("reductionKilometrique") or c.get("reductionKilometrique")
                 ),
-                "distance_avec_precedent": detail.get("distanceAvecPrecedent")
-                or c.get("distanceAvecPrecedent"),
+                # Objet côté PMU, comme sur les participants.
+                "distance_avec_precedent": as_texte(
+                    detail.get("distanceAvecPrecedent") or c.get("distanceAvecPrecedent")
+                ),
             }
         )
     return [l for l in lignes if l["date_course"] is not None]
