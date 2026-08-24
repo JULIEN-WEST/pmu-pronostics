@@ -45,16 +45,21 @@ def apply_schema(conn, path: str = "sql/001_schema.sql") -> None:
 
 def _verifier_schema(conn) -> None:
     """
-    Garde-fou de migration.
+    Migration automatique quand elle est sans risque.
 
     Le schéma s'applique avec `CREATE TABLE IF NOT EXISTS` : une base
     créée par une version antérieure n'est donc PAS modifiée. Or
     `cheval.id_cheval` est passé de `bigint` à `text` — le PMU renvoie
     « KHAMEPHIS GAME-AKITA-ZARAK », pas un nombre.
 
-    Sur une base restée en `bigint`, l'insertion échouerait partant après
-    partant, en silence relatif. Mieux vaut refuser de démarrer avec un
-    message qui dit exactement quoi faire.
+    Plutôt que d'exiger une manipulation de volumes dans Portainer, on
+    tranche selon ce que la base contient RÉELLEMENT :
+
+      - aucune donnée exploitable  -> on recrée le schéma, c'est sans
+        perte et l'utilisateur n'a rien à faire ;
+      - des données               -> on refuse, en expliquant. Effacer
+        l'historique des cotes de quelqu'un sans le lui demander serait
+        impardonnable : il ne se reconstitue jamais.
     """
     row = conn.execute(
         """
@@ -63,25 +68,45 @@ def _verifier_schema(conn) -> None:
            AND column_name = 'id_cheval'
         """
     ).fetchone()
-    if row and row["data_type"] not in ("text", "character varying"):
-        raise RuntimeError(
-            "\n"
-            "╔══════════════════════════════════════════════════════════════╗\n"
-            "║  BASE DE DONNEES OBSOLETE                                    ║\n"
-            "╠══════════════════════════════════════════════════════════════╣\n"
-            "║  cheval.id_cheval est en '%-10s' au lieu de 'text'.     ║\n"
-            "║                                                              ║\n"
-            "║  L'API PMU renvoie un identifiant TEXTE                      ║\n"
-            "║  (« KHAMEPHIS GAME-AKITA-ZARAK »), pas un nombre.            ║\n"
-            "║                                                              ║\n"
-            "║  A FAIRE dans Portainer :                                    ║\n"
-            "║    1. Stacks -> pmu -> Delete this stack                     ║\n"
-            "║       en cochant « Remove volumes »                          ║\n"
-            "║    2. Recreer la stack (les donnees actuelles sont vides,    ║\n"
-            "║       il n'y a rien a sauvegarder)                           ║\n"
-            "╚══════════════════════════════════════════════════════════════╝"
-            % row["data_type"][:10]
+    if not row or row["data_type"] in ("text", "character varying"):
+        return  # base neuve ou déjà au bon format
+
+    ancien = row["data_type"]
+    try:
+        n = conn.execute("SELECT count(*) AS n FROM pmu.partant").fetchone()["n"]
+    except Exception:  # noqa: BLE001 — table absente sur un schéma très ancien
+        conn.rollback()
+        n = 0
+
+    if n == 0:
+        log.warning(
+            "schéma obsolète (cheval.id_cheval en %s) et base vide "
+            "— recréation automatique, aucune donnée perdue", ancien
         )
+        conn.execute("DROP SCHEMA IF EXISTS pmu CASCADE")
+        conn.execute("CREATE SCHEMA pmu")
+        conn.execute("SET search_path TO pmu, public")
+        conn.commit()
+        return
+
+    raise RuntimeError(
+        "\n"
+        "+==============================================================+\n"
+        "|  BASE DE DONNEES OBSOLETE - INTERVENTION NECESSAIRE          |\n"
+        "+==============================================================+\n"
+        f"|  cheval.id_cheval est en '{ancien}' au lieu de 'text'.\n"
+        f"|  La base contient {n} partants : je ne l'efface pas tout seul.\n"
+        "|\n"
+        "|  L'historique des cotes ne se reconstitue jamais apres coup.\n"
+        "|  Sauvegarder d'abord si ces donnees comptent :\n"
+        "|    docker exec pmu-db pg_dump -U pmu pmu | gzip > pmu.sql.gz\n"
+        "|\n"
+        "|  Puis, dans Portainer :\n"
+        "|    1. Stacks -> pmu -> Stop this stack\n"
+        "|    2. Volumes -> cocher pmu_pmu_db et pmu_pmu_data -> Remove\n"
+        "|    3. Stacks -> pmu -> Start / Pull and redeploy\n"
+        "+==============================================================+"
+    )
 
 
 # ---------------------------------------------------------------------

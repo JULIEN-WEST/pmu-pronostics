@@ -1,0 +1,17 @@
+# Portainer envoie tout le dépôt cloné comme contexte de build.
+# Sans ce fichier, .git part dans l'image et le build est inutilement lent.
+.git
+.gitignore
+__pycache__
+*.pyc
+.pytest_cache
+.venv
+venv
+fixtures/
+modeles/
+.tmp_modeles/
+.cache/
+.env
+*.zip
+homeassistant/
+README.md

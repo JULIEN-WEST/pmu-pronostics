@@ -85,6 +85,93 @@ def test_drapeau_amorcage_empeche_la_reprise():
         assert n == 1
 
 
+# ---------------------------------------------------------------------
+# Migration de schéma
+# ---------------------------------------------------------------------
+
+def _ancien_schema(conn, avec_donnees: bool = False) -> None:
+    """Recrée la forme d'avant la correction : id_cheval en bigint."""
+    conn.execute("DROP SCHEMA IF EXISTS pmu CASCADE")
+    conn.execute("CREATE SCHEMA pmu")
+    conn.execute("CREATE TABLE pmu.cheval (id_cheval bigint PRIMARY KEY, nom text)")
+    conn.execute("CREATE TABLE pmu.partant (course_id bigint, num_pmu smallint)")
+    if avec_donnees:
+        conn.execute("INSERT INTO pmu.partant VALUES (1, 1), (1, 2)")
+    conn.commit()
+
+
+@pytestmark_db
+def test_migration_automatique_si_la_base_est_vide():
+    """
+    Le cas réel : une base créée par l'ancienne version, restée vide parce
+    que la collecte échouait. La recréer ne perd rien — on le fait donc
+    sans rien demander, plutôt que d'imposer une manipulation de volumes.
+    """
+    from pmu.planificateur import _preparer_base
+
+    with db.connect(DSN) as conn:
+        _ancien_schema(conn)
+
+    assert _preparer_base() is True
+
+    with db.connect(DSN) as conn:
+        t = conn.execute(
+            """SELECT data_type FROM information_schema.columns
+                WHERE table_schema='pmu' AND table_name='cheval'
+                  AND column_name='id_cheval'"""
+        ).fetchone()
+        assert t["data_type"] == "text"
+        # Le schéma complet a bien été appliqué derrière.
+        conn.execute("SELECT count(*) FROM pmu.collecte_journal")
+
+
+@pytestmark_db
+def test_migration_refusee_si_la_base_contient_des_donnees():
+    """
+    L'historique des cotes ne se reconstitue jamais après coup. Dès qu'il
+    y a des partants, on refuse et on explique — jamais d'effacement
+    silencieux.
+    """
+    from pmu.planificateur import _preparer_base
+
+    with db.connect(DSN) as conn:
+        _ancien_schema(conn, avec_donnees=True)
+
+    assert _preparer_base() is False
+
+    with db.connect(DSN) as conn:
+        n = conn.execute("SELECT count(*) AS n FROM pmu.partant").fetchone()["n"]
+        assert n == 2, "les données existantes ne doivent pas être touchées"
+        conn.execute("DROP SCHEMA IF EXISTS pmu CASCADE")
+        conn.commit()
+
+
+@pytestmark_db
+def test_une_erreur_de_config_n_est_pas_prise_pour_une_base_lente():
+    """
+    Régression : la boucle de reconnexion attrapait toute exception et
+    affichait « base pas encore prête » douze fois. Le vrai message —
+    celui qui dit quoi faire — n'apparaissait jamais, et le conteneur
+    redémarrait en boucle.
+
+    Seules les erreurs de CONNEXION doivent déclencher un nouvel essai.
+    """
+    import time as _time
+    from pmu.planificateur import _preparer_base
+
+    with db.connect(DSN) as conn:
+        _ancien_schema(conn, avec_donnees=True)
+
+    debut = _time.monotonic()
+    assert _preparer_base() is False
+    # 12 tentatives à 5 s feraient une minute : on doit répondre tout de suite.
+    assert _time.monotonic() - debut < 5, "l'erreur de config a été retentée"
+
+    with db.connect(DSN) as conn:
+        conn.execute("DROP SCHEMA IF EXISTS pmu CASCADE")
+        conn.commit()
+
+
 @pytestmark_db
 def test_un_echec_ne_pose_pas_le_drapeau():
     """

@@ -36,6 +36,8 @@ import time
 import traceback
 from datetime import date, datetime, time as dtime, timedelta, timezone
 
+import psycopg
+
 from . import collect, db, mqtt_ha
 from .client import PmuClient, PmuError, PmuNotFound
 from .predict import entrainer, pronostiquer
@@ -371,6 +373,59 @@ class Planificateur:
 
 # ---------------------------------------------------------------------
 
+def _veille(raison: str) -> None:
+    """
+    Met le conteneur en veille au lieu de sortir en erreur.
+
+    Sortir déclencherait le redémarrage automatique de Portainer, donc une
+    boucle : le message d'erreur défilerait sans fin et deviendrait
+    illisible. En veille, il reste en haut du journal, là où on le lit.
+    """
+    log.error("%s — le conteneur reste en veille. Corrige, puis redémarre-le "
+              "depuis Portainer.", raison)
+    while True:
+        time.sleep(3600)
+
+
+def _preparer_base() -> bool:
+    """
+    Applique le schéma, en attendant que PostgreSQL soit prêt.
+
+    ⚠️ On ne réessaie QUE sur une erreur de connexion. Un `except
+    Exception` large ici transformerait toute erreur de configuration en
+    « base pas encore prête », répété douze fois puis abandonné — le vrai
+    message, celui qui dit quoi faire, ne serait jamais affiché. C'est
+    exactement ce qui est arrivé avec le contrôle de schéma.
+    """
+    from .predict import SQL_TABLE
+
+    chemin = os.environ.get("PMU_SCHEMA", "sql/001_schema.sql")
+    derniere: Exception | None = None
+
+    for tentative in range(12):
+        try:
+            with db.connect() as conn:
+                db.apply_schema(conn, chemin)
+                conn.execute(SQL_TABLE)
+                conn.commit()
+            return True
+        except psycopg.OperationalError as exc:
+            derniere = exc
+            log.info("base pas encore prête, nouvelle tentative dans 5 s (%d/12)",
+                     tentative + 1)
+            time.sleep(5)
+        except RuntimeError as exc:
+            # Erreur de configuration : réessayer n'y changera rien.
+            log.error("%s", exc)
+            return False
+        except Exception:  # noqa: BLE001
+            _sur("préparation de la base en échec")
+            return False
+
+    log.error("base injoignable après 1 minute : %s", derniere)
+    return False
+
+
 def main() -> None:
     logging.basicConfig(
         level=os.environ.get("PMU_LOG", "INFO"),
@@ -379,32 +434,11 @@ def main() -> None:
 
     client = PmuClient(cache_dir=CACHE, rps=RPS)
 
-    # Le schéma s'applique à chaque démarrage : idempotent, et ça évite
-    # une étape manuelle oubliée après un `docker compose down -v`.
-    for tentative in range(12):
-        try:
-            with db.connect() as conn:
-                db.apply_schema(conn, os.environ.get("PMU_SCHEMA", "sql/001_schema.sql"))
-                from .predict import SQL_TABLE
-                conn.execute(SQL_TABLE)
-                conn.commit()
-            break
-        except Exception:  # noqa: BLE001 — la base peut démarrer plus lentement
-            log.info("base pas encore prête, nouvelle tentative dans 5 s (%d/12)",
-                     tentative + 1)
-            time.sleep(5)
-    else:
-        log.error("base injoignable après 1 minute — arrêt")
-        raise SystemExit(1)
+    if not _preparer_base():
+        _veille("base de données inutilisable")
 
     if not diagnostic(client):
-        # On ne sort pas en erreur : le conteneur reste vivant et retentera
-        # au prochain redémarrage. Sortir ferait boucler Portainer sur des
-        # redémarrages, ce qui n'aide personne à lire le diagnostic.
-        log.error("API PMU injoignable — le conteneur reste en veille, "
-                  "corrige puis redémarre-le")
-        while True:
-            time.sleep(3600)
+        _veille("API PMU injoignable")
 
     with db.connect() as conn:
         amorcer(conn, client)
