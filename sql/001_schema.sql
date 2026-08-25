@@ -343,3 +343,38 @@ FROM cote co
 JOIN course c ON c.course_id = co.course_id
 WHERE c.heure_depart IS NULL OR co.releve_le <= c.heure_depart
 ORDER BY co.course_id, co.num_pmu, co.type_pari, co.releve_le DESC;
+
+-- ---------------------------------------------------------------------
+-- 7. Météo par hippodrome
+-- ---------------------------------------------------------------------
+--
+-- ⚠️ Ces deux tables sont créées ICI, dans le schéma de base, et pas
+-- seulement par `pmu.meteo`. La raison : `dataset.charger()` fait une
+-- jointure externe dessus. Si elles n'existaient qu'après le premier
+-- appel au module météo, TOUTE l'extraction échouerait sur
+-- « relation meteo does not exist » tant qu'aucune météo n'a été
+-- collectée — c'est-à-dire au premier démarrage.
+
+CREATE TABLE IF NOT EXISTS meteo_lieu (
+    hippodrome_code text PRIMARY KEY,
+    libelle         text,
+    latitude        double precision,
+    longitude       double precision,
+    -- Un géocodage qui échoue est mémorisé lui aussi : sans ça, chaque
+    -- collecte retenterait indéfiniment les mêmes libellés introuvables.
+    resolu          boolean NOT NULL DEFAULT false,
+    tente_le        timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS meteo (
+    hippodrome_code text NOT NULL,
+    date_course     date NOT NULL,
+    temperature     numeric(5,1),
+    pluie_jour      numeric(6,2),   -- mm cumulés sur la journée de course
+    pluie_24h       numeric(6,2),   -- mm cumulés sur les 24 h précédentes
+    vent_max        numeric(5,1),
+    humidite        numeric(5,1),
+    source          text,           -- 'archive' / 'prevision'
+    collecte_le     timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (hippodrome_code, date_course)
+);

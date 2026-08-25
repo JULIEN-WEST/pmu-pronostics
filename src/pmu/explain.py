@@ -260,10 +260,31 @@ def faits(ligne: pd.Series) -> dict:
         sens = "convient" if dd > 0 else "ne convient pas"
         out["lignee"].append(f"la distance {sens} à la lignée {pere}")
     croise, croise_n = _v(ligne, "g_croisement"), _v(ligne, "g_croisement_n")
-    mere = _v(ligne, "nom_pere_mere", None)
-    if croise_n and croise_n >= 10 and not pd.isna(croise) and pere and mere:
+    pere_mere = _v(ligne, "nom_pere_mere", None)
+    if croise_n and croise_n >= 10 and not pd.isna(croise) and pere and pere_mere:
         out["lignee"].append(
-            f"croisement {pere} × {mere} : {_pct(croise)} de places ({int(croise_n)} courses)")
+            f"croisement {pere} × {pere_mere} : {_pct(croise)} de places "
+            f"({int(croise_n)} courses)")
+    # Ligne maternelle : petits effectifs par nature — une poulinière
+    # produit cinq à dix chevaux — donc on affiche toujours le nombre.
+    mere = _v(ligne, "nom_mere", None)
+    g_mere, g_mere_n = _v(ligne, "g_mere"), _v(ligne, "g_mere_n")
+    if mere and not pd.isna(g_mere) and g_mere_n and g_mere_n >= 3:
+        out["lignee"].append(
+            f"produits de {mere} placés {_pct(g_mere)} du temps "
+            f"({int(g_mere_n)} courses)")
+    dm = _v(ligne, "g_mere_terrain_delta")
+    if not pd.isna(dm) and abs(dm) > 0.03 and mere:
+        out["lignee"].append(
+            f"la famille de {mere} {'aime' if dm > 0 else 'fuit'} ce terrain")
+    da = _v(ligne, "g_accouplement_delta")
+    if not pd.isna(da) and abs(da) > 0.03 and pere and mere:
+        out["lignee"].append(
+            f"l'accouplement {pere} × {mere} "
+            f"{'donne mieux' if da > 0 else 'donne moins bien'} que la moyenne de {pere}")
+    el, el_n = _v(ligne, "h_eleveur_place"), _v(ligne, "h_eleveur_place_n")
+    if not pd.isna(el) and el_n and el_n >= 10:
+        out["lignee"].append(f"élevage placé {_pct(el)} du temps ({int(el_n)} courses)")
 
     # -- Entourage ---------------------------------------------------
     drv = _v(ligne, "driver", None)

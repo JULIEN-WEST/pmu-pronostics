@@ -318,6 +318,24 @@ def construire(df: pd.DataFrame, *, avec_marche: bool = True) -> pd.DataFrame:
         # que le public avait jugé à l'ouverture.
         df["c_taux_non_partants"] = 1.0 - (n_part / declares.replace(0, np.nan))
 
+    # --- Météo relevée sur place ---
+    # `etat_terrain` est un adjectif posé par un commissaire. La pluie
+    # des 24 h précédentes est un chiffre, et c'est elle qui a fait le
+    # terrain — pas celle de l'après-midi.
+    for brut, nom in [("meteo_temperature", "c_temperature"),
+                      ("meteo_pluie_jour", "c_pluie_jour"),
+                      ("meteo_pluie_24h", "c_pluie_24h"),
+                      ("meteo_vent", "c_vent"),
+                      ("meteo_humidite", "c_humidite")]:
+        if brut in df.columns:
+            df[nom] = pd.to_numeric(df[brut], errors="coerce")
+    if "c_pluie_24h" in df.columns and "c_pluie_jour" in df.columns:
+        # Terrain déjà détrempé à l'arrivée sur l'hippodrome, plus ce qui
+        # tombe pendant la réunion.
+        df["c_pluie_totale"] = df["c_pluie_24h"].fillna(0) + df["c_pluie_jour"].fillna(0)
+        df["c_pluie_totale"] = df["c_pluie_totale"].where(
+            df["c_pluie_24h"].notna() | df["c_pluie_jour"].notna())
+
     df["c_corde"] = pd.to_numeric(df["place_corde"], errors="coerce")
     # La corde ne veut rien dire dans l'absolu : 3 sur 8 ≠ 3 sur 18.
     df["c_corde_rel"] = df["c_corde"] / df["c_nb_partants"]
@@ -429,6 +447,10 @@ def construire(df: pd.DataFrame, *, avec_marche: bool = True) -> pd.DataFrame:
         # même taux qu'un particulier qui en a un. Information disponible
         # avant le départ, et jamais exploitée jusqu'ici.
         ("h_proprio_place",    ["id_proprietaire"],              "y_place",   prior_p, 30, 0),
+        # L'éleveur : collecté depuis le début, jamais lu. Un naisseur
+        # qui sort régulièrement des chevaux de tête n'est pas le fruit
+        # du hasard — c'est un signal de lignée, pas d'entourage.
+        ("h_eleveur_place",    ["id_eleveur"],                   "y_place",   prior_p, 25, 0),
     ]
     specs = [s for s in specs if all(c in df.columns for c in s[1])]
     for nom, cles, cible, prior, pn, min_n in specs:
@@ -456,19 +478,47 @@ def construire(df: pd.DataFrame, *, avec_marche: bool = True) -> pd.DataFrame:
     # C'est l'axe généalogie du projet d'origine. Les produits d'un étalon
     # partagent des aptitudes ; on mesure ça sur les courses ANTÉRIEURES
     # des autres produits, jamais sur la course en cours.
+    # (nom, clés, cible, prior, pseudo_n, min_n)
     lignee = [
-        ("g_pere",             ["nom_pere"],                    "y_place", prior_p, 40),
-        ("g_pere_mere",        ["nom_pere_mere"],               "y_place", prior_p, 40),
-        ("g_croisement",       ["nom_pere", "nom_pere_mere"],   "y_place", prior_p, 20),
-        ("g_pere_terrain",     ["nom_pere", "c_terrain"],       "y_place", prior_p, 25),
-        ("g_pere_mere_terrain", ["nom_pere_mere", "c_terrain"], "y_place", prior_p, 25),
-        ("g_pere_distance",    ["nom_pere", "c_bande_distance"], "y_place", prior_p, 25),
-        ("g_pere_discipline",  ["nom_pere", "discipline"],      "y_place", prior_p, 25),
+        ("g_pere",             ["nom_pere"],                    "y_place", prior_p, 40, 0),
+        ("g_pere_mere",        ["nom_pere_mere"],               "y_place", prior_p, 40, 0),
+        ("g_croisement",       ["nom_pere", "nom_pere_mere"],   "y_place", prior_p, 20, 0),
+        ("g_pere_terrain",     ["nom_pere", "c_terrain"],       "y_place", prior_p, 25, 0),
+        ("g_pere_mere_terrain", ["nom_pere_mere", "c_terrain"], "y_place", prior_p, 25, 0),
+        ("g_pere_distance",    ["nom_pere", "c_bande_distance"], "y_place", prior_p, 25, 0),
+        ("g_pere_discipline",  ["nom_pere", "discipline"],      "y_place", prior_p, 25, 0),
     ]
-    for nom, cles, cible, prior, pn in lignee:
-        taux, eff = _taux_glissant(df, cles, cible, prior=prior, pseudo_n=pn)
+    # ── La ligne MATERNELLE ───────────────────────────────────────────
+    # C'est l'axe que suivent réellement les éleveurs de trotteurs, et
+    # il manquait entièrement : seuls le père et le père de mère étaient
+    # exploités. Une poulinière produit peu — cinq à dix produits dans
+    # sa carrière — donc les effectifs sont petits ; d'où un lissage
+    # bien plus fort, qui empêche « deux produits, deux victoires » de
+    # ressortir comme une lignée d'exception.
+    if "nom_mere" in df.columns:
+        # ⚠️ `min_n` n'est pas décoratif ici. Avec deux ou trois produits
+        # connus, un taux lissé bouge encore trois fois plus qu'un taux
+        # d'étalon calculé sur des centaines de courses — un test l'a
+        # montré. En dessous du minimum, la feature vaut donc NaN : le
+        # modèle sait traiter une valeur absente, il ne sait pas deviner
+        # qu'un chiffre est du bruit.
+        lignee += [
+            ("g_mere",         ["nom_mere"],                  "y_place", prior_p, 15, 4),
+            ("g_mere_terrain", ["nom_mere", "c_terrain"],     "y_place", prior_p, 12, 3),
+            # Famille maternelle : la mère ET son père. Deux juments
+            # homonymes issues de pères différents ne sont pas la même
+            # famille, et les homonymes sont fréquents.
+            ("g_famille",      ["nom_mere", "nom_pere_mere"], "y_place", prior_p, 15, 4),
+        ]
+    for nom, cles, cible, prior, pn, min_n in lignee:
+        taux, eff = _taux_glissant(df, cles, cible, prior=prior,
+                                   pseudo_n=pn, min_n=min_n)
         df[nom] = taux
         df[f"{nom}_n"] = eff
+    if "g_mere" in df.columns:
+        df["g_mere_terrain_delta"] = df["g_mere_terrain"] - df["g_mere"]
+        # L'accouplement lui-même : ce père sur cette mère.
+        df["g_accouplement_delta"] = df["g_famille"] - df["g_pere"]
     # Spécialisation de la lignée : l'étalon transmet-il une aptitude
     # PARTICULIÈRE au lourd, au-delà de sa qualité moyenne ?
     df["g_pere_terrain_delta"] = df["g_pere_terrain"] - df["g_pere"]

@@ -38,7 +38,7 @@ from datetime import date, datetime, time as dtime, timedelta, timezone
 
 import psycopg
 
-from . import collect, db, mqtt_ha
+from . import collect, meteo as mt, db, mqtt_ha
 from .client import PmuClient, PmuError, PmuNotFound
 from .predict import entrainer, pronostiquer
 
@@ -185,6 +185,11 @@ def amorcer(conn, client: PmuClient) -> None:
         if not db.deja_collecte(conn, "programme", client.fmt_date(jour)):
             try:
                 collect.collecte_jour(conn, client, jour, avec_perfs=True)
+                try:
+                    mt.enrichir(conn, jour)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("météo non collectée pour %s : %s", jour, exc)
+                    conn.rollback()
             except Exception:  # noqa: BLE001
                 # Le rollback n'est pas optionnel : après une erreur SQL,
                 # psycopg refuse toute instruction suivante tant que la
@@ -264,6 +269,14 @@ class Planificateur:
     def collecte_programme(self, conn, jour: date) -> None:
         log.info("── collecte du programme %s", jour)
         collect.collecte_jour(conn, self.client, jour, avec_perfs=True)
+        # Météo : bonus, jamais bloquant. Une erreur ici ne doit pas
+        # empêcher la collecte de se terminer.
+        try:
+            mt.enrichir(conn, jour)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("météo non collectée pour %s : %s", jour, exc)
+            conn.rollback()
+
         db.link_genealogie(conn)
         conn.commit()
 

@@ -97,7 +97,10 @@ SELECT
     h.libelle_long     AS hippodrome,
     p.num_pmu, p.id_cheval,
     ch.nom             AS nom_cheval,
-    ch.nom_pere, ch.nom_pere_mere,
+    -- La MÈRE et l'ÉLEVEUR étaient collectés depuis le premier jour et
+    -- n'avaient jamais été lus. En trot, la famille maternelle est ce
+    -- que suivent les éleveurs — bien avant l'étalon.
+    ch.nom_pere, ch.nom_pere_mere, ch.nom_mere, ch.id_eleveur,
     p.age, p.sexe, p.place_corde, p.handicap_poids, p.handicap_distance,
     p.deferre, p.oeilleres,
     p.musique, p.nombre_courses, p.nombre_victoires, p.nombre_places,
@@ -119,6 +122,12 @@ SELECT
     c.conditions, c.condition_age, c.condition_sexe, c.corde,
     c.nombre_declares_partants,
     cs.cote_n, cs.cote_min, cs.cote_max, cs.cote_ecart_type, ca.cote_t15,
+    -- Météo relevée sur place. La pluie des 24 h précédentes fait le
+    -- terrain ; l'adjectif « bon » posé par le commissaire ne dit rien
+    -- de ce qui est tombé la nuit d'avant.
+    mt.temperature AS meteo_temperature, mt.pluie_jour AS meteo_pluie_jour,
+    mt.pluie_24h   AS meteo_pluie_24h,  mt.vent_max    AS meteo_vent,
+    mt.humidite    AS meteo_humidite,
     'direct'::text     AS source
 FROM partant p
 JOIN course     c  ON c.course_id = p.course_id
@@ -131,6 +140,8 @@ LEFT JOIN cote_fin   cf ON cf.course_id = p.course_id AND cf.num_pmu = p.num_pmu
 LEFT JOIN cote_ouv   cv ON cv.course_id = p.course_id AND cv.num_pmu = p.num_pmu
 LEFT JOIN cote_serie cs ON cs.course_id = p.course_id AND cs.num_pmu = p.num_pmu
 LEFT JOIN cote_avant ca ON ca.course_id = p.course_id AND ca.num_pmu = p.num_pmu
+LEFT JOIN meteo      mt ON mt.hippodrome_code = r.hippodrome_code
+                       AND mt.date_course = c.date_reunion
 WHERE c.date_reunion BETWEEN %(depuis)s AND %(jusqua)s
 """
 
@@ -167,7 +178,7 @@ SELECT
     NULL::smallint     AS num_pmu,
     pp.id_cheval,
     ch.nom             AS nom_cheval,
-    ch.nom_pere, ch.nom_pere_mere,
+    ch.nom_pere, ch.nom_pere_mere, ch.nom_mere, ch.id_eleveur,
     NULL::smallint     AS age,
     ch.sexe,
     pp.corde           AS place_corde,
@@ -210,6 +221,11 @@ SELECT
     NULL::numeric      AS cote_max,
     NULL::double precision AS cote_ecart_type,
     NULL::numeric      AS cote_t15,
+    NULL::numeric      AS meteo_temperature,
+    NULL::numeric      AS meteo_pluie_jour,
+    NULL::numeric      AS meteo_pluie_24h,
+    NULL::numeric      AS meteo_vent,
+    NULL::numeric      AS meteo_humidite,
     'importe'::text    AS source
 FROM performance_passee pp
 LEFT JOIN cheval ch ON ch.id_cheval = pp.id_cheval
