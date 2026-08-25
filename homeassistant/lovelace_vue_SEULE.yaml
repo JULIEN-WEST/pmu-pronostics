@@ -5,168 +5,286 @@
 # la vue ».
 #
 # ⚠️ Efface TOUT le contenu de l'éditeur avant de coller ceci.
+# ⚠️ Remplace 192.168.1.85 par l'adresse de la machine qui héberge la
+#    pile Docker, aux DEUX endroits marqués « ADRESSE À ADAPTER ».
 #
 # Si tu passes au contraire par l'éditeur brut du tableau de bord
 # entier (celui qui montre « views: »), utilise l'autre fichier,
 # lovelace_vue_pronostics.yaml, qui commence par un tiret.
+#
+# ───────────────────────────────────────────────────────────────────
+# CE QUI CHANGE : LA VUE RICHE EST UNE PAGE, PLUS UNE CARTE MARKDOWN
+#
+# Une carte markdown ne sait pas dessiner : elle rend du texte, et une
+# jauge en caractères reste une jauge en caractères. L'API sert
+# désormais une vraie page (/vue) avec barres, podium et surtout la
+# JUSTIFICATION de chaque sélection — forme, chrono, lignée, aptitude,
+# entourage. Elle s'intègre par une carte `iframe`, sans HACS.
+#
+# ⚠️ LE PIÈGE DE L'IFRAME, à connaître avant de crier à la panne :
+# une page servie en HTTP ne s'affiche PAS dans un Home Assistant
+# ouvert en HTTPS. Le navigateur bloque le contenu mixte, et il le
+# fait SILENCIEUSEMENT — cadre blanc, aucun message.
+#   · accès local http://192.168.1.85:8123     → l'iframe fonctionne
+#   · accès Nabu Casa https://….ui.nabu.casa   → cadre vide
+# D'où les cartes markdown conservées dessous : elles marchent
+# partout et prennent le relais quand l'iframe est bloqué.
 
+type: sections
+max_columns: 3
+dense_section_placement: true
 title: Pronostics
 path: pronostics
 icon: mdi:horse-variant
-cards:
 
-  # ── Bandeau d'état ──────────────────────────────────────────────
+sections:
+
+  # ═══ La page riche, sur toute la largeur ══════════════════════════
   - type: grid
-    columns: 4
-    square: false
+    column_span: 3
     cards:
+
+      - type: heading
+        heading: Pronostics du jour
+        heading_style: title
+        icon: mdi:horse-variant
+
+      - type: iframe
+        # ADRESSE À ADAPTER (1/2)
+        url: http://192.168.1.85:8100/vue
+        # 100 % = carré. Au-delà, la page est plus haute que large :
+        # il faut de la place pour déplier une justification.
+        aspect_ratio: 125%
+
+  # ═══ Colonne 1 — état de la pile ══════════════════════════════════
+  - type: grid
+    column_span: 1
+    cards:
+
+      - type: heading
+        heading: État
+        heading_style: subtitle
+        icon: mdi:gauge
+
       - type: tile
         entity: sensor.pmu_courses
         name: Courses
         icon: mdi:calendar-today
+        grid_options: {columns: 6}
       - type: tile
         entity: sensor.pmu_confiance
         name: Confiance
         icon: mdi:gauge
+        grid_options: {columns: 6}
       - type: tile
         entity: sensor.pmu_favori_proba
         name: Favori
         icon: mdi:trophy-outline
+        grid_options: {columns: 6}
       - type: tile
         entity: sensor.pmu_age_calcul
         name: Calculé il y a
         icon: mdi:update
+        grid_options: {columns: 6}
 
-  # ── Première collecte en cours ──────────────────────────────────
-  # Sans cette carte, la vue resterait vide une à deux heures au premier
-  # démarrage, et un écran vide ressemble à une panne.
-  - type: conditional
-    conditions:
-      - condition: state
-        entity: sensor.pmu_courses
-        state: "0"
-    card:
-      type: markdown
-      content: >-
-        {%- set ns = namespace(l=[]) -%}
-        {%- if state_attr('sensor.pmu_courses', 'amorcage') -%}
-        {%- set ns.l = ["## ⏳ Première collecte en cours", "",
-            state_attr('sensor.pmu_courses', 'message') | default("", true), "",
-            "Rien à faire : la vue se remplira toute seule."] -%}
-        {%- else -%}
-        {%- set ns.l = ["## Aucune course aujourd'hui", "",
-            "Soit le programme du jour est vide, soit la collecte n'a pas encore tourné ce matin."] -%}
-        {%- endif -%}
-        {{ ns.l | join('\n') }}
+      # ── Première collecte en cours ──────────────────────────────
+      # Sans cette carte, la vue resterait vide une à deux heures au
+      # premier démarrage, et un écran vide ressemble à une panne.
+      - type: conditional
+        conditions:
+          - condition: state
+            entity: sensor.pmu_courses
+            state: "0"
+        card:
+          type: markdown
+          content: >-
+            {%- set ns = namespace(l=[]) -%}
+            {%- if state_attr('sensor.pmu_courses', 'amorcage') -%}
+            {%- set ns.l = ["## ⏳ Première collecte en cours", "",
+                state_attr('sensor.pmu_courses', 'message') | default("", true), "",
+                "Rien à faire : la vue se remplira toute seule."] -%}
+            {%- else -%}
+            {%- set ns.l = ["## Aucune course aujourd'hui", "",
+                "Soit le programme du jour est vide, soit la collecte n'a pas encore tourné ce matin."] -%}
+            {%- endif -%}
+            {{ ns.l | join('\n') }}
 
-  # ── Alerte si la pile ne répond plus ────────────────────────────
-  # binary_sensor.pmu_frais est en device_class « problem » :
-  # 'on' = problème = pronostic périmé ou pile arrêtée.
-  - type: conditional
-    conditions:
-      - condition: state
-        entity: binary_sensor.pmu_frais
-        state: "on"
-    card:
-      type: markdown
-      content: >-
-        {%- set ns = namespace(l=["## ⚠️ Pronostics périmés", "",
-            "Le dernier calcul remonte à **" ~ states('sensor.pmu_age_calcul') ~ " h**.", "",
-            "La pile Docker est probablement arrêtée, ou la collecte échoue.",
-            "Regarder les journaux du conteneur `pmu-collecteur` dans Portainer."]) -%}
-        {{ ns.l | join('\n') }}
+      # ── Alerte si la pile ne répond plus ────────────────────────
+      # binary_sensor.pmu_frais est en device_class « problem » :
+      # 'on' = problème = pronostic périmé ou pile arrêtée.
+      - type: conditional
+        conditions:
+          - condition: state
+            entity: binary_sensor.pmu_frais
+            state: "on"
+        card:
+          type: markdown
+          content: >-
+            {%- set ns = namespace(l=["## ⚠️ Pronostics périmés", "",
+                "Le dernier calcul remonte à **" ~ states('sensor.pmu_age_calcul') ~ " h**.", "",
+                "La pile Docker est probablement arrêtée, ou la collecte échoue.",
+                "Regarder les journaux du conteneur `pmu-collecteur` dans Portainer."]) -%}
+            {{ ns.l | join('\n') }}
 
-  # ── Prochaine course ────────────────────────────────────────────
-  - type: markdown
-    content: >-
-      {%- set p = state_attr('sensor.pmu_courses', 'prochaine') -%}
-      {%- set lib = {"ATTELE": "Attelé", "MONTE": "Monté", "PLAT": "Plat",
-                     "HAIES": "Haies", "STEEPLECHASE": "Steeple", "CROSS": "Cross"} -%}
-      {%- set ns = namespace(l=[]) -%}
-      {%- if p -%}
-      {%- set heure = (p.depart | as_datetime | as_local).strftime('%H:%M') if p.depart else "—" -%}
-      {%- set ns.l = ["## " ~ p.code ~ " · " ~ (p.hippodrome | default("", true)), "",
-          p.libelle | default("", true), "",
-          lib.get(p.discipline, p.discipline | default("", true)) ~ " · "
-            ~ p.distance ~ " m · " ~ p.partants ~ " partants · départ " ~ heure, "",
-          "| N° | Cheval | Probabilité | Cote | Valeur |",
-          "|---:|:-------|:------------|-----:|-------:|"] -%}
-      {%- for c in p.selection -%}
-      {%- set n = [((c.proba | float(0)) * 24) | round | int, 12] | min -%}
-      {%- set v = c.valeur -%}
-      {%- set val = "—" if v is none else (("**+" ~ ((v | float(0)) * 100) | round | int ~ " %**")
-            if (v | float(0)) > 0.15 else (((v | float(0)) * 100) | round | int ~ " %")) -%}
-      {%- set ns.l = ns.l + ["| **" ~ c.num ~ "** | "
-          ~ (c.cheval | default("?", true) | truncate(18, true, "…")) ~ " | `"
-          ~ ("█" * n) ~ ("·" * (12 - n)) ~ "` "
-          ~ ((c.proba | float(0)) * 100) | round(1) ~ " % | "
-          ~ (c.cote if c.cote else "—") ~ " | " ~ val ~ " |"] -%}
-      {%- endfor -%}
-      {%- set ec = p.confiance | float(0) -%}
-      {%- set niveau = "élevée" if ec > 0.10 else ("moyenne" if ec > 0.05 else "faible") -%}
-      {%- set ns.l = ns.l + ["",
-          "*Écart entre le 1ᵉʳ et le 2ᵉ choix : " ~ (ec * 100) | round(1)
-          ~ " points — confiance " ~ niveau ~ ".*"] -%}
-      {%- else -%}
-      {%- set ns.l = ["## Plus de course aujourd'hui", "",
-          "Le programme est terminé, ou la collecte n'a pas encore tourné."] -%}
-      {%- endif -%}
-      {{ ns.l | join('\n') }}
+      # ── Prochaine course, en texte ──────────────────────────────
+      # Doublon volontaire de la page : c'est ce qui reste lisible sur
+      # un téléphone en 4G, où l'iframe HTTP est bloquée.
+      - type: markdown
+        content: >-
+          {%- macro joli(t) -%}{{ t | default('', true) | lower | title
+            | replace(' Du ', ' du ') | replace(' De ', ' de ') | replace(' Des ', ' des ')
+            | replace(' Le ', ' le ') | replace(' La ', ' la ') | replace(' Les ', ' les ')
+            | replace(' Et ', ' et ') | replace(' Au ', ' au ') | replace(' Aux ', ' aux ')
+            | replace(" D'", " d'") | replace(" L'", " l'") }}{%- endmacro -%}
+          {%- macro lieu(t) -%}{{ joli(t | default('', true)
+            | replace('HIPPODROME DE ', '') | replace("HIPPODROME D'", '')
+            | replace('HIPPODROME ', '')) }}{%- endmacro -%}
+          {%- set p = state_attr('sensor.pmu_courses', 'prochaine') -%}
+          {%- set lib = {"ATTELE": "Attelé", "MONTE": "Monté", "PLAT": "Plat",
+                         "HAIES": "Haies", "STEEPLECHASE": "Steeple", "CROSS": "Cross"} -%}
+          {%- set ns = namespace(l=[]) -%}
+          {%- if p -%}
+          {%- set heure = (p.depart | as_datetime | as_local).strftime('%H:%M') if p.depart else "—" -%}
+          {%- set sel = p.selection | default([], true) -%}
+          {%- set nb = p.partants if p.partants else (sel | length) -%}
+          {%- set a_cote = (sel | selectattr('cote') | list | length) > 0 -%}
+          {%- set ns.l = ["### " ~ p.code ~ " · " ~ lieu(p.hippodrome), "",
+              "**" ~ (p.libelle | default("", true) | lower | capitalize) ~ "**", "",
+              lib.get(p.discipline, p.discipline | default("", true)) ~ " · "
+                ~ p.distance ~ " m · " ~ nb ~ " partants · départ **" ~ heure ~ "**", ""] -%}
+          {%- if a_cote -%}
+          {%- set ns.l = ns.l + ["| N° | Cheval | Chance | Cote | Valeur |",
+                                 "|---:|:-------|:-------|-----:|-------:|"] -%}
+          {%- else -%}
+          {%- set ns.l = ns.l + ["| N° | Cheval | Chance |",
+                                 "|---:|:-------|:-------|"] -%}
+          {%- endif -%}
+          {%- for c in sel[:8] -%}
+          {%- set pc = (c.proba | float(0)) * 100 -%}
+          {%- set n = [((c.proba | float(0)) * 20) | round | int, 10] | min -%}
+          {%- set barre = "`" ~ ("█" * n) ~ ("░" * (10 - n)) ~ "`" -%}
+          {%- set nom = joli(c.cheval | default("?", true)) -%}
+          {%- set nom = ("**" ~ nom ~ "**") if loop.first else nom -%}
+          {%- set v = c.valeur -%}
+          {%- set val = "—" if v is none else (("**+" ~ ((v | float(0)) * 100) | round | int ~ " %**")
+                if (v | float(0)) > 0.15 else (((v | float(0)) * 100) | round | int ~ " %")) -%}
+          {%- set base = "| " ~ c.num ~ " | " ~ nom ~ " | " ~ barre ~ " " ~ pc | round(1) ~ " %" -%}
+          {%- set ns.l = ns.l + [base ~ (" | " ~ (c.cote if c.cote else "—") ~ " | " ~ val ~ " |")
+                if a_cote else (base ~ " |")] -%}
+          {%- endfor -%}
+          {%- set premier = sel[0] if sel else none -%}
+          {%- if premier and premier.motifs -%}
+          {%- set ns.l = ns.l + ["", "**Pourquoi " ~ joli(premier.cheval) ~ " :**"] -%}
+          {%- for m in premier.motifs[:3] -%}
+          {%- set ns.l = ns.l + ["- " ~ ("▲" if m.sens == "+" else "▼") ~ " **" ~ m.titre ~ "** — "
+              ~ ((m.details | default([], true))[:2] | join(" · "))] -%}
+          {%- endfor -%}
+          {%- endif -%}
+          {%- set ec = p.confiance | float(0) -%}
+          {%- set niveau = "élevée" if ec > 0.10 else ("moyenne" if ec > 0.05 else "faible") -%}
+          {%- set ns.l = ns.l + ["",
+              "*Écart 1ᵉʳ / 2ᵉ choix : " ~ (ec * 100) | round(1)
+              ~ " points — confiance " ~ niveau ~ ".*"] -%}
+          {%- else -%}
+          {%- set ns.l = ["### Plus de course aujourd'hui", "",
+              "Le programme est terminé, ou la collecte n'a pas encore tourné."] -%}
+          {%- endif -%}
+          {{ ns.l | join('\n') }}
 
-  # ── Programme du jour ───────────────────────────────────────────
-  - type: markdown
-    content: >-
-      {%- set jour = state_attr('sensor.pmu_courses', 'date') -%}
-      {%- set ns = namespace(l=[
-          "## Programme du " ~ ((jour | as_datetime).strftime('%d/%m') if jour else "—"), "",
-          "| Course | Hippodrome | Départ | Sélection | Conf. | |",
-          "|:-------|:-----------|-------:|:----------|------:|:-|"]) -%}
-      {%- for c in state_attr('sensor.pmu_courses', 'programme') or [] -%}
-      {%- set top = c.selection[0] if c.selection else none -%}
-      {%- set etat = "—" if not top else ("⏳" if not c.arrivee_connue
-            else ("✅" if top.arrivee == 1 else "❌")) -%}
-      {%- set choix = "—" if not top else (top.num ~ " · "
-            ~ (top.cheval | default("?", true) | truncate(16, true, "…"))
-            ~ " (" ~ ((top.proba | float(0)) * 100) | round | int ~ " %)") -%}
-      {%- set ns.l = ns.l + ["| **" ~ c.code ~ "** | "
-          ~ (c.hippodrome | default("", true) | truncate(16, true, "")) ~ " | "
-          ~ ((c.depart | as_datetime | as_local).strftime('%H:%M') if c.depart else "—")
-          ~ " | " ~ choix ~ " | " ~ ((c.confiance | float(0)) * 100) | round | int
-          ~ " | " ~ etat ~ " |"] -%}
-      {%- endfor -%}
-      {%- set ns.l = ns.l + ["",
-          "*✅ le favori du modèle a gagné · ❌ non · ⏳ course à venir."
-          ~ " Indicateur visuel seulement : un taux de réussite se lit sur"
-          ~ " plusieurs centaines de courses, pas sur une journée.*"] -%}
-      {{ ns.l | join('\n') }}
+  # ═══ Colonnes 2-3 — le programme, en texte ════════════════════════
+  - type: grid
+    column_span: 2
+    cards:
+      - type: markdown
+        text_only: true
+        content: >-
+          {%- macro joli(t) -%}{{ t | default('', true) | lower | title
+            | replace(' Du ', ' du ') | replace(' De ', ' de ') | replace(' Des ', ' des ')
+            | replace(' Le ', ' le ') | replace(' La ', ' la ') | replace(' Les ', ' les ')
+            | replace(' Et ', ' et ') | replace(' Au ', ' au ') | replace(' Aux ', ' aux ')
+            | replace(" D'", " d'") | replace(" L'", " l'") }}{%- endmacro -%}
+          {%- macro lieu(t) -%}{{ joli(t | default('', true)
+            | replace('HIPPODROME DE ', '') | replace("HIPPODROME D'", '')
+            | replace('HIPPODROME ', '')) }}{%- endmacro -%}
+          {%- set jour = state_attr('sensor.pmu_courses', 'date') -%}
+          {%- set prog = state_attr('sensor.pmu_courses', 'programme') or [] -%}
+          {%- set faites = prog | selectattr('arrivee_connue') | list | length -%}
+          {%- set ns = namespace(l=[
+              "## Programme du " ~ ((jour | as_datetime).strftime('%d/%m') if jour else "—"), "",
+              (prog | length) ~ " courses · " ~ faites ~ " déjà courues", "",
+              "| Course | Départ | Hippodrome | Favori du modèle | Conf. | |",
+              "|:-------|-------:|:-----------|:-----------------|:------|:-|"]) -%}
+          {%- for c in prog -%}
+          {%- set top = c.selection[0] if c.selection else none -%}
+          {%- set etat = "—" if not top else ("🕐" if not c.arrivee_connue
+                else ("✅" if top.arrivee == 1 else "✖️")) -%}
+          {%- set ec = c.confiance | float(0) -%}
+          {%- set pts = "●●●" if ec > 0.10 else ("●●" if ec > 0.05 else "●") -%}
+          {%- set choix = "—" if not top else ("**" ~ top.num ~ "** · "
+                ~ joli(top.cheval | default("?", true))
+                ~ "  ·  " ~ ((top.proba | float(0)) * 100) | round | int ~ " %") -%}
+          {%- set ns.l = ns.l + ["| **" ~ c.code ~ "** | "
+              ~ ((c.depart | as_datetime | as_local).strftime('%H:%M') if c.depart else "—")
+              ~ " | " ~ lieu(c.hippodrome) ~ " | " ~ choix
+              ~ " | " ~ pts ~ " | " ~ etat ~ " |"] -%}
+          {%- endfor -%}
+          {%- set ns.l = ns.l + ["",
+              "*✅ le favori du modèle a gagné · ✖️ non · 🕐 course à venir."
+              ~ " Les points donnent l'écart entre le 1ᵉʳ et le 2ᵉ choix :"
+              ~ " ●●● course tranchée, ● course ouverte."
+              ~ " Indicateur visuel seulement : un taux de réussite se lit sur"
+              ~ " plusieurs centaines de courses, pas sur une journée.*"] -%}
+          {{ ns.l | join('\n') }}
 
-  # ── Ce que le modèle est et n'est pas ───────────────────────────
-  - type: markdown
-    content: >-
-      {%- set ns = namespace(l=["### Lecture", "",
-          "Les probabilités sont **calibrées** : quand le modèle annonce 20 %,"
-          ~ " l'événement arrive environ une fois sur cinq.", "",
-          "La colonne **Valeur** vaut `probabilité × cote − 1`. Positive, elle"
-          ~ " signale un écart avec le marché — pas un pari gagnant. Le PMU est"
-          ~ " un pari mutuel : le prélèvement est retiré avant répartition, donc"
-          ~ " un écart doit dépasser ce prélèvement pour valoir quelque chose,"
-          ~ " et se vérifier sur plusieurs centaines de courses."]) -%}
-      {{ ns.l | join('\n') }}
+  # ═══ Bas de page — lecture et diagnostics ═════════════════════════
+  - type: grid
+    column_span: 3
+    cards:
 
-  # ── Diagnostics ─────────────────────────────────────────────────
-  - type: entities
-    title: Pile PMU
-    show_header_toggle: false
-    entities:
-      - entity: binary_sensor.pmu_frais
-        name: État des pronostics
-      - entity: sensor.pmu_courses
-        name: Courses du jour
-      - entity: sensor.pmu_prochaine
-        name: Prochaine course
-      - entity: sensor.pmu_prochaine_depart
-        name: Départ
-      - entity: sensor.pmu_favori
-        name: Favori du modèle
-      - entity: sensor.pmu_age_calcul
-        name: Âge du calcul
+      - type: heading
+        heading: Comprendre et vérifier
+        heading_style: subtitle
+        icon: mdi:information-outline
+
+      - type: markdown
+        text_only: true
+        grid_options: {columns: 6}
+        content: >-
+          {%- set ns = namespace(l=["### Lecture", "",
+              "Les probabilités sont **calibrées** : quand le modèle annonce 20 %,"
+              ~ " l'événement arrive environ une fois sur cinq.", "",
+              "La colonne **Valeur** vaut `probabilité × cote − 1`. Positive, elle"
+              ~ " signale un écart avec le marché — pas un pari gagnant. Le PMU est"
+              ~ " un pari mutuel : le prélèvement est retiré avant répartition, donc"
+              ~ " un écart doit dépasser ce prélèvement pour valoir quelque chose,"
+              ~ " et se vérifier sur plusieurs centaines de courses.", "",
+              "Les **motifs** de la page indiquent ce qui a pesé sur la note"
+              ~ " dans ce lot précis. Ce sont des associations mesurées, pas des"
+              ~ " causes : le modèle constate que les chevaux à ce profil gagnent"
+              ~ " plus souvent, il n'explique pas pourquoi."]) -%}
+          {{ ns.l | join('\n') }}
+
+      - type: entities
+        title: Pile PMU
+        show_header_toggle: false
+        grid_options: {columns: 6}
+        entities:
+          - entity: binary_sensor.pmu_frais
+            name: État des pronostics
+          - entity: sensor.pmu_courses
+            name: Courses du jour
+          - entity: sensor.pmu_prochaine
+            name: Prochaine course
+          - entity: sensor.pmu_prochaine_depart
+            name: Départ
+          - entity: sensor.pmu_favori
+            name: Favori du modèle
+          - entity: sensor.pmu_age_calcul
+            name: Âge du calcul
+      # ADRESSE À ADAPTER (2/2) — lien de secours si l'iframe reste vide
+      - type: markdown
+        text_only: true
+        content: >-
+          [Ouvrir la page des pronostics dans un onglet](http://192.168.1.85:8100/vue)
+          — utile si le cadre ci-dessus reste blanc, ce qui arrive quand
+          Home Assistant est ouvert en HTTPS.

@@ -206,7 +206,35 @@ def construire_charge(conn, jour: date | None = None) -> dict:
             (maintenant - datetime.fromisoformat(courses[0]["calcule_le"])).total_seconds()
             / 3600, 1)
 
-    def compacter(c: dict, n_partants: int) -> dict:
+    def _motifs(s: dict) -> list:
+        """
+        Justification, RADICALEMENT taillée pour MQTT.
+
+        Les attributs d'entité Home Assistant partent dans la base du
+        recorder à chaque changement d'état. Y déverser les faits
+        complets de quinze partants sur quarante courses ferait gonfler
+        la base de plusieurs mégaoctets par jour, pour un texte que
+        personne ne lit. Trois motifs, deux détails chacun, et
+        seulement pour la course à venir : le reste se consulte sur la
+        page /vue, qui n'a pas cette contrainte.
+        """
+        return [
+            {"titre": m.get("titre"), "sens": m.get("sens"),
+             "details": [str(d)[:90] for d in (m.get("details") or [])[:2]]}
+            for m in (s.get("motifs") or [])[:3]
+        ]
+
+    def compacter(c: dict, n_partants: int, *, avec_motifs: bool = False) -> dict:
+        selection = []
+        for s in c["selection"][:n_partants]:
+            ligne = {"num": s["num"], "cheval": s["cheval"],
+                     "proba": s["proba"], "cote": s["cote"],
+                     "valeur": s["valeur"], "arrivee": s["arrivee"]}
+            if avec_motifs:
+                ligne["driver"] = s.get("driver")
+                ligne["musique"] = s.get("musique")
+                ligne["motifs"] = _motifs(s)
+            selection.append(ligne)
         return {
             "code": c["code"],
             "hippodrome": c["hippodrome"],
@@ -217,12 +245,7 @@ def construire_charge(conn, jour: date | None = None) -> dict:
             "partants": c["partants"],
             "confiance": round(c["confiance"], 3),
             "arrivee_connue": c["arrivee_connue"],
-            "selection": [
-                {"num": s["num"], "cheval": s["cheval"],
-                 "proba": s["proba"], "cote": s["cote"],
-                 "valeur": s["valeur"], "arrivee": s["arrivee"]}
-                for s in c["selection"][:n_partants]
-            ],
+            "selection": selection,
         }
 
     return {
@@ -232,8 +255,9 @@ def construire_charge(conn, jour: date | None = None) -> dict:
         "age_heures": age_h if age_h is not None else 999,
         "frais": age_h is not None and age_h < 24,
         "maj": maintenant.isoformat(),
-        # La prochaine course est détaillée ; les autres sont résumées.
-        "prochaine": compacter(proch, 8) if proch else None,
+        # La prochaine course est détaillée et justifiée ; les autres
+        # sont résumées, sans motifs.
+        "prochaine": compacter(proch, 8, avec_motifs=True) if proch else None,
         "programme": [compacter(c, 4) for c in courses[:10]],
     }
 

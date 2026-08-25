@@ -293,6 +293,25 @@ def test_pronostic_et_relecture(base):
     total = sum(s["proba"] for s in c["selection"])
     assert 0.97 <= total <= 1.03, f"somme des probabilités = {total}"
 
+    # La justification doit survivre à l'aller-retour PostgreSQL. C'est
+    # le seul endroit où le jsonb est réellement écrit puis relu ; un
+    # test en mémoire ne prouverait rien sur la sérialisation.
+    brut = base.execute(
+        "SELECT count(*) AS n FROM pronostic WHERE details IS NOT NULL"
+    ).fetchone()
+    assert brut["n"] > 0, "aucune justification écrite en base"
+
+    avec_motifs = [s for co in courses for s in co["selection"] if s["motifs"]]
+    assert avec_motifs, "aucun motif relu depuis la base"
+    m = avec_motifs[0]["motifs"][0]
+    assert {"groupe", "titre", "icone", "sens", "poids"} <= set(m)
+    assert m["sens"] in ("+", "−")
+    assert isinstance(m.get("details"), list)
+    # Les champs qui nourrissent la vue : ils doivent être là, quitte à
+    # valoir None, sinon la vue affiche « undefined ».
+    for champ in ("pere", "musique", "gains", "nb_courses", "entraineur", "faits"):
+        assert champ in avec_motifs[0], f"champ {champ} absent de la sélection"
+
 
 def test_insertion_d_un_participant_reel(base):
     """

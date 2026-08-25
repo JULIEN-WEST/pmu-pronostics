@@ -11,6 +11,7 @@ Endpoints :
     GET /sante                     état de la pile, volumétrie
     GET /pronostics                journée complète
     GET /pronostics/{code}         une course, ex. R1C3
+    GET /vue                       page HTML visuelle, à mettre en iframe
     GET /ha/resume                 charge utile compacte pour Home Assistant
     GET /ha/prochaine              la course à venir, formatée pour l'affichage
 
@@ -26,9 +27,9 @@ import os
 from datetime import date, datetime, timedelta, timezone
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 
-from . import dataset, db
+from . import dataset, db, vue
 from .predict import lire_pronostics
 
 log = logging.getLogger("pmu.api")
@@ -121,6 +122,50 @@ def pronostic_course(
         if c["code"].upper() == code.upper():
             return c
     raise HTTPException(404, f"{code} introuvable le {jour}")
+
+
+# ---------------------------------------------------------------------
+# Page visuelle
+# ---------------------------------------------------------------------
+
+@app.get("/vue", response_class=HTMLResponse)
+def vue_html(
+    date_: str | None = Query(None, alias="date"),
+    modele: str = Query(MODELE_DEFAUT),
+):
+    """
+    Page autonome, à intégrer dans Home Assistant par une carte `iframe`.
+
+    ⚠️ Un détail qui coûte une soirée si on l'ignore : une page servie
+    en HTTP ne s'affiche PAS dans un Home Assistant ouvert en HTTPS
+    (Nabu Casa, reverse proxy). Le navigateur bloque le contenu mixte,
+    silencieusement. En accès local http://…:8123 l'iframe fonctionne ;
+    par l'accès distant il faut servir cette page en HTTPS aussi.
+    """
+    jour = _jour(date_)
+    courses: list[dict] = []
+    meta: dict = {"modele": modele}
+    try:
+        with db.connect() as conn:
+            if _table_existe(conn, "pronostic"):
+                courses = lire_pronostics(conn, jour, modele)
+                row = conn.execute(
+                    "SELECT max(calcule_le) AS dernier FROM pronostic"
+                ).fetchone()
+                if row and row["dernier"]:
+                    age = (datetime.now(timezone.utc) - row["dernier"]).total_seconds() / 3600
+                    meta["age_heures"] = round(age, 1)
+                    meta["frais"] = age < 24
+    except Exception as exc:  # noqa: BLE001 — la page ne doit jamais rendre une 500
+        log.exception("vue indisponible")
+        meta["erreur"] = str(exc)
+
+    # Le cache court évite qu'un tableau de bord ouvert en permanence
+    # rejoue la requête à chaque rafraîchissement d'iframe.
+    return HTMLResponse(
+        vue.page(courses, jour=jour, meta=meta),
+        headers={"Cache-Control": "public, max-age=60"},
+    )
 
 
 # ---------------------------------------------------------------------

@@ -255,6 +255,69 @@ def parse_musique(musique: Any) -> list[dict]:
 
 
 # ---------------------------------------------------------------------
+# Marge d'arrivée
+# ---------------------------------------------------------------------
+
+# L'écart au cheval précédent, tel que le PMU l'écrit : « 2 L », « 1/2 L »,
+# « NEZ », « TETE COURTE », « DIST. ». C'est une information que la place
+# seule ne donne pas : battu d'un nez ou de vingt longueurs, on est
+# deuxième dans les deux cas, et ce n'est pas du tout la même course.
+_MARGE_MOTS = {
+    "NEZ": 0.05, "COURTE TETE": 0.10, "TETE COURTE": 0.10, "TETE": 0.15,
+    "COURTE ENCOLURE": 0.25, "ENCOLURE": 0.30,
+    "COURTE DEMI LONGUEUR": 0.4, "DEMI LONGUEUR": 0.5,
+    "TROIS QUARTS DE LONGUEUR": 0.75,
+    "DEAD HEAT": 0.0, "DEADHEAT": 0.0,
+}
+# « DIST. » veut dire distancé : un écart si grand qu'il n'est plus mesuré.
+# 25 longueurs est une convention, pas une mesure — mais laisser NaN
+# reviendrait à traiter une déroute comme une donnée manquante.
+MARGE_DISTANCE = 25.0
+_MARGE_FRACTION = re.compile(r"^(\d+)\s*/\s*(\d+)")
+_MARGE_NOMBRE = re.compile(r"^(\d+)(?:\s+(\d+)\s*/\s*(\d+))?")
+
+
+def parse_marge(valeur: Any) -> float | None:
+    """
+    Écart au cheval précédent, converti en longueurs.
+
+    Renvoie None quand l'information est absente ou illisible — surtout
+    pas 0, qui signifierait « arrivés ensemble » et serait un contresens.
+    """
+    txt = as_texte(valeur)
+    if not txt:
+        return None
+    t = strip_accents(str(txt)).upper().replace("’", "'").strip()
+    t = t.replace(".", " ").replace("-", " ")
+    t = re.sub(r"\s+", " ", t).strip()
+    if not t:
+        return None
+    if t.startswith("DIST") or "DISTANCE" == t:
+        return MARGE_DISTANCE
+    sans_l = re.sub(r"\bL(ONGUEURS?)?\b", " ", t).strip()
+    sans_l = re.sub(r"\s+", " ", sans_l)
+
+    for mot, val in _MARGE_MOTS.items():
+        if sans_l == mot or t == mot:
+            return val
+    # ⚠️ La fraction seule se teste EN PREMIER : « 1/2 » commence par un
+    # chiffre, donc le motif « nombre » le happerait et rendrait 1
+    # longueur au lieu d'une demie — une erreur silencieuse d'un facteur
+    # deux sur les arrivées serrées, précisément celles qui comptent.
+    m = _MARGE_FRACTION.match(sans_l)
+    if m and float(m.group(2)):
+        return float(m.group(1)) / float(m.group(2))
+    # « 2 1/2 » = deux longueurs et demie.
+    m = _MARGE_NOMBRE.match(sans_l)
+    if m and m.group(1):
+        val = float(m.group(1))
+        if m.group(2) and m.group(3) and float(m.group(3)):
+            val += float(m.group(2)) / float(m.group(3))
+        return val
+    return None
+
+
+# ---------------------------------------------------------------------
 # Programme → réunions / courses
 # ---------------------------------------------------------------------
 

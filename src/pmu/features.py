@@ -36,7 +36,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from .normalize import parse_musique
+from .normalize import parse_marge, parse_musique
 
 # Colonnes issues du marché : légitimes, mais à manier séparément.
 # Un modèle qui les voit apprend surtout à recopier la cote — il sera très
@@ -45,6 +45,38 @@ from .normalize import parse_musique
 #   - sans marché  → cherche un écart exploitable
 #   - avec marché  → borne haute de ce qui est prévisible
 COLONNES_MARCHE = ["mkt_cote", "mkt_proba_implicite", "mkt_rang_cote", "mkt_derive"]
+
+# Regroupement des disciplines en FAMILLES.
+#
+# Pourquoi regrouper plutôt que prendre la discipline telle quelle : les
+# trois disciplines d'obstacle réunies pèsent moins qu'un seul jour
+# d'attelé. Les scinder donnerait trois modèles faméliques là où un seul,
+# nourri des trois, tient debout. À l'inverse attelé et monté, qui sont
+# tous deux du trot, ne partagent NI les mêmes drivers, NI la même
+# incidence du déferrage, NI la même prime au poids : les fondre serait
+# la même erreur en sens inverse.
+#
+# Ce découpage est une hypothèse, pas une vérité. `ModeleParDiscipline`
+# le met à l'épreuve famille par famille et n'en garde que ce qui gagne.
+FAMILLES = {
+    "ATTELE": "ATTELE",
+    "MONTE": "MONTE",
+    "PLAT": "PLAT",
+    "HAIES": "OBSTACLE",
+    "STEEPLECHASE": "OBSTACLE",
+    "STEEPLE-CHASE": "OBSTACLE",
+    "STEEPLE CHASE": "OBSTACLE",
+    "CROSS": "OBSTACLE",
+    "CROSS-COUNTRY": "OBSTACLE",
+}
+
+
+def famille(discipline) -> "pd.Series | str":
+    """Discipline PMU → famille. Accepte une série ou une chaîne."""
+    if isinstance(discipline, pd.Series):
+        up = discipline.fillna("").astype(str).str.upper().str.strip()
+        return up.map(FAMILLES).fillna("AUTRE")
+    return FAMILLES.get(str(discipline or "").upper().strip(), "AUTRE")
 
 # Lissage bayésien : un cheval 1 victoire / 1 course n'a pas 100 % de
 # réussite. On tire le taux vers la moyenne globale avec un poids
@@ -104,6 +136,44 @@ def _taux_glissant(
     if min_n:
         taux = taux.where(effectif >= min_n, np.nan)
     return taux, effectif.astype(float)
+
+
+def _passe_du_cheval(df: pd.DataFrame, valeurs: pd.Series) -> dict:
+    """
+    Statistiques d'une grandeur NUMÉRIQUE sur les seules courses
+    antérieures du cheval : moyenne, meilleur, dernière valeur, effectif.
+
+    Pourquoi c'est plus simple ici que dans `_taux_glissant` : un cheval
+    ne court qu'une fois par course. La ligne courante est donc la seule
+    de sa course pour cette clé, et un décalage d'un cran suffit — pas
+    besoin de retrancher le cumul de la course. Le piège des demi-frères
+    qui se voient l'un l'autre n'existe pas quand la clé est le cheval
+    lui-même.
+
+    C'est ce qui permet d'exploiter la RÉDUCTION KILOMÉTRIQUE, jusqu'ici
+    inutilisée. La place dit qui a gagné ; le chrono dit à quelle vitesse.
+    Une 5e place en 1'12 vaut mieux qu'une victoire en 1'16, et aucune
+    feature de classement ne peut le savoir.
+    """
+    v = pd.to_numeric(valeurs, errors="coerce").where(df["est_exploitable"])
+    cle = df["id_cheval"]
+    presente = v.notna()
+
+    g_somme = v.fillna(0.0).groupby(cle, sort=False).cumsum() - v.fillna(0.0)
+    g_n = presente.astype(float).groupby(cle, sort=False).cumsum() - presente.astype(float)
+
+    precedente = v.groupby(cle, sort=False).shift(1)
+    meilleur = precedente.groupby(cle, sort=False).cummin()
+    # `cummin` laisse un trou tant qu'aucune valeur n'est encore connue ;
+    # on propage la dernière valeur atteinte pour boucher ces trous.
+    meilleur = meilleur.groupby(cle, sort=False).ffill()
+
+    return {
+        "moy": (g_somme / g_n.replace(0, np.nan)),
+        "n": g_n,
+        "best": meilleur,
+        "derniere": precedente.groupby(cle, sort=False).ffill(),
+    }
 
 
 def _bande_distance(d: pd.Series) -> pd.Series:
@@ -178,10 +248,31 @@ def construire(df: pd.DataFrame, *, avec_marche: bool = True) -> pd.DataFrame:
     n_part = pd.to_numeric(df["nombre_partants"], errors="coerce")
     seuil_place = np.where(n_part >= 8, 3, 2)
     df["y_place"] = ((place > 0) & (place <= seuil_place)).astype(float)
-    # Un non-partant n'a pas de résultat : il sera écarté à l'entraînement.
+    # ── Deux notions distinctes, et les confondre coûte cher ──────────
+    #
+    # `est_exploitable` : cette ligne COMPTE dans l'historique. Elle a un
+    #   résultat connu, donc elle alimente les taux glissants — forme du
+    #   cheval, réussite du driver, aptitude de la lignée.
+    #
+    # `est_cible` : cette ligne peut servir d'EXEMPLE, à l'entraînement
+    #   comme à la prédiction. Cela exige des colonnes que les lignes
+    #   importées n'ont pas : cote, gains, musique, entraîneur.
+    #
+    # Les 108 000 performances importées sont exploitables sans être des
+    # cibles. Elles donnent au modèle la mémoire de chaque cheval — deux
+    # ans et demi de carrière au lieu des deux mois de collecte directe —
+    # tout en restant hors du jeu d'entraînement, où leurs colonnes vides
+    # brouilleraient l'apprentissage.
     df["est_exploitable"] = place.notna() & df["statut"].ne("NON_PARTANT")
+    source = df["source"] if "source" in df.columns else pd.Series("direct", index=df.index)
+    df["est_cible"] = df["est_exploitable"] & source.eq("direct")
 
     # --- Contexte de course ---
+    # `famille` sert à router vers un modèle spécialisé (cf. train.py). Elle
+    # n'est volontairement PAS préfixée : `colonnes_features()` ne la
+    # ramassera donc pas, et elle ne partira jamais dans le modèle — où
+    # elle serait de toute façon constante à l'intérieur d'une famille.
+    df["famille"] = famille(df["discipline"])
     df["c_distance"] = pd.to_numeric(df["distance"], errors="coerce")
     df["c_bande_distance"] = _bande_distance(df["c_distance"])
     df["c_terrain"] = _classe_terrain(df.get("etat_terrain", pd.Series(index=df.index, dtype=object)))
@@ -220,16 +311,66 @@ def construire(df: pd.DataFrame, *, avec_marche: bool = True) -> pd.DataFrame:
     derniere = df.groupby("id_cheval", sort=False)["heure_depart"].shift(1)
     df["p_jours_repos"] = (df["heure_depart"] - derniere).dt.total_seconds() / 86400.0
 
+    # --- Vitesse : le chrono, jusqu'ici resté en base sans servir ---
+    #
+    # `reduction_km_ms` est le temps au kilomètre, en millisecondes. Plus
+    # bas = plus rapide. C'est la mesure de valeur la moins bruitée dont
+    # on dispose : une place dépend du lot rencontré, un chrono non.
+    #
+    # ⚠️ C'est une colonne de RÉSULTAT. Elle n'est lisible que sur les
+    # courses ANTÉRIEURES du cheval — d'où `_passe_du_cheval`, et jamais
+    # `df["reduction_km_ms"]` en direct. La liste `interdites` en fin de
+    # fichier verrouille cette règle.
+    if "reduction_km_ms" in df.columns:
+        red = _passe_du_cheval(df, df["reduction_km_ms"])
+        df["v_reduction_moy"] = red["moy"]
+        df["v_reduction_best"] = red["best"]
+        df["v_reduction_derniere"] = red["derniere"]
+        df["v_reduction_n"] = red["n"]
+        # Écart entre la moyenne et le record : un cheval régulier et un
+        # cheval capable d'un coup d'éclat ne se parient pas pareil.
+        df["v_reduction_irregularite"] = df["v_reduction_moy"] - df["v_reduction_best"]
+        # Progression : dernier chrono contre moyenne de carrière.
+        # Négatif = le cheval va plus vite qu'à son habitude.
+        df["v_reduction_progres"] = df["v_reduction_derniere"] - df["v_reduction_moy"]
+
+    # --- Marge d'arrivée : la qualité de la défaite ---
+    # Deuxième d'un nez ou deuxième de vingt longueurs, la place est la
+    # même et la course n'a rien à voir.
+    if "distance_cheval_precedent" in df.columns:
+        marge = df["distance_cheval_precedent"].map(parse_marge)
+        pas = _passe_du_cheval(df, marge)
+        df["v_marge_moy"] = pas["moy"]
+        df["v_marge_derniere"] = pas["derniere"]
+
+    # --- Recul au trot : un handicap explicite, connu avant le départ ---
+    if "handicap_distance" in df.columns:
+        recul = pd.to_numeric(df["handicap_distance"], errors="coerce").fillna(0.0)
+        df["c_recul"] = recul
+        # 25 m de recul sur 2700 m ne pèsent pas comme sur 1609 m.
+        df["c_recul_rel"] = recul / df["c_distance"].replace(0, np.nan)
+        # Le recul ne vaut que par comparaison au lot : tout le monde
+        # reculé de 25 m, c'est une course sans handicap.
+        df["c_recul_relatif_lot"] = recul - df.groupby("course_id", sort=False)[
+            "c_recul"].transform("min")
+
     # --- Position dans le lot : le signal le plus sous-estimé ---
     # Ce qui compte n'est pas le niveau absolu du cheval mais son niveau
     # RELATIF aux autres partants de SA course. Un rang intra-course est
     # calculé sur des colonnes déjà anti-fuite, il n'introduit rien.
     par_course = df.groupby("course_id", sort=False)
-    for col, nom in [("p_gains_par_course", "r_gains"),
-                     ("p_taux_victoire", "r_taux_vict"),
-                     ("mus_moy", "r_musique"),
-                     ("p_gains_log", "r_gains_tot")]:
-        df[nom] = par_course[col].rank(pct=True, ascending=(nom == "r_musique"))
+    # `ascending=True` pour les grandeurs où PLUS BAS est MEILLEUR
+    # (moyenne de musique, chrono au kilomètre, marge encaissée).
+    rangs = [("p_gains_par_course", "r_gains", False),
+             ("p_taux_victoire", "r_taux_vict", False),
+             ("mus_moy", "r_musique", True),
+             ("p_gains_log", "r_gains_tot", False),
+             ("v_reduction_moy", "r_vitesse", True),
+             ("v_reduction_best", "r_vitesse_best", True),
+             ("v_marge_moy", "r_marge", True)]
+    for col, nom, croissant in rangs:
+        if col in df.columns:
+            df[nom] = par_course[col].rank(pct=True, ascending=croissant)
 
     # --- Taux glissants : cheval, driver, entraîneur ---
     prior_g = float(df.loc[df["est_exploitable"], "y_gagnant"].mean() or 0.1)
@@ -244,7 +385,12 @@ def construire(df: pd.DataFrame, *, avec_marche: bool = True) -> pd.DataFrame:
         ("h_entr_gagne",       ["id_entraineur"],                "y_gagnant", prior_g, 30, 0),
         ("h_couple_gagne",     ["id_cheval", "id_driver"],       "y_gagnant", prior_g, 5,  0),
         ("h_attelage_gagne",   ["id_driver", "id_entraineur"],   "y_gagnant", prior_g, 15, 0),
+        # L'écurie : un propriétaire qui aligne trente chevaux n'a pas le
+        # même taux qu'un particulier qui en a un. Information disponible
+        # avant le départ, et jamais exploitée jusqu'ici.
+        ("h_proprio_place",    ["id_proprietaire"],              "y_place",   prior_p, 30, 0),
     ]
+    specs = [s for s in specs if all(c in df.columns for c in s[1])]
     for nom, cles, cible, prior, pn, min_n in specs:
         taux, eff = _taux_glissant(df, cles, cible, prior=prior, pseudo_n=pn, min_n=min_n)
         df[nom] = taux
@@ -316,7 +462,7 @@ def construire(df: pd.DataFrame, *, avec_marche: bool = True) -> pd.DataFrame:
 
 def colonnes_features(df: pd.DataFrame, *, avec_marche: bool = False) -> list[str]:
     """Colonnes à donner au modèle. Tout le reste est métadonnée ou cible."""
-    prefixes = ("c_", "p_", "mus_", "r_", "h_", "a_", "g_")
+    prefixes = ("c_", "p_", "mus_", "r_", "h_", "a_", "g_", "v_")
     cols = [c for c in df.columns if c.startswith(prefixes)]
     cols += [c for c in ("discipline", "specialite", "c_terrain") if c in df.columns]
     if avec_marche:
@@ -325,7 +471,7 @@ def colonnes_features(df: pd.DataFrame, *, avec_marche: bool = False) -> list[st
     interdites = {
         "ordre_arrivee", "y_gagnant", "y_place", "statut_arrivee", "temps_officiel_ms",
         "reduction_km_ms", "commentaire_apres_course", "distance_cheval_precedent",
-        "est_exploitable",
+        "est_exploitable", "est_cible", "source",
     }
     fuites = interdites.intersection(cols)
     if fuites:
