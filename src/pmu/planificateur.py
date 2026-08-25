@@ -445,9 +445,16 @@ def _preparer_base() -> bool:
                 db.apply_schema(conn, chemin)
                 conn.execute(SQL_TABLE)
                 if remis_a_zero:
-                    # Consigné APRÈS recréation du schéma, sinon la trace
-                    # partirait avec la table qu'on vient de supprimer.
-                    db.journal(conn, "reset", jeton_reset, "OK")
+                    # Le jeton a déjà été consigné par `reinitialiser`,
+                    # dans la transaction du vidage : un échec de
+                    # `apply_schema` ne peut plus laisser la base vide
+                    # sans trace, et donc plus déclencher un second
+                    # vidage au redémarrage suivant.
+                    log.warning(
+                        "base réinitialisée (jeton %s). Retirer PMU_RESET de "
+                        "la stack : la variable a fait son travail, et la "
+                        "laisser expose à un nouveau vidage si sa valeur "
+                        "change.", jeton_reset)
                 conn.commit()
             return True
         except psycopg.OperationalError as exc:

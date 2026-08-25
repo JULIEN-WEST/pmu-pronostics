@@ -72,6 +72,36 @@ def reinitialiser(conn, jeton: str) -> bool:
     )
     conn.execute("DROP SCHEMA IF EXISTS pmu CASCADE")
     conn.execute("CREATE SCHEMA pmu")
+
+    # ⚠️ LE JETON EST CONSIGNÉ ICI, dans la MÊME transaction que la
+    # destruction — et surtout AVANT que le reste du schéma s'applique.
+    #
+    # Il l'était auparavant à la fin de `_preparer_base`, après
+    # `apply_schema`. N'importe quel échec entre les deux (schéma
+    # invalide, migration en erreur, base momentanément indisponible)
+    # laissait donc la base vidée SANS trace du jeton — et le
+    # redémarrage suivant la vidait à nouveau. Une variable oubliée dans
+    # la stack devenait une boucle de destruction silencieuse, invisible
+    # tant qu'on ne comptait pas les lignes.
+    #
+    # Le journal est la seule table dont dépend cette garantie : on la
+    # crée à la main, et `apply_schema` la retrouvera telle quelle
+    # (CREATE TABLE IF NOT EXISTS).
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS collecte_journal (
+            id          bigserial PRIMARY KEY,
+            ressource   text NOT NULL,
+            cle         text NOT NULL,
+            statut      text NOT NULL,
+            http_code   integer,
+            message     text,
+            duree_ms    integer,
+            fait_le     timestamptz NOT NULL DEFAULT now(),
+            UNIQUE (ressource, cle)
+        )
+    """)
+    journal(conn, "reset", jeton, "OK", None,
+            "reinitialisation appliquee et consignee immediatement")
     conn.commit()
     return True
 
