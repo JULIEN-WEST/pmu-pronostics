@@ -124,6 +124,27 @@ def pronostic_course(
     raise HTTPException(404, f"{code} introuvable le {jour}")
 
 
+@app.get("/bilan")
+def bilan(
+    modele: str = Query(MODELE_DEFAUT),
+    depuis: str | None = Query(None, description="AAAA-MM-JJ"),
+    jusqua: str | None = Query(None, description="AAAA-MM-JJ"),
+):
+    """
+    Ce que les pronostics PUBLIÉS ont réellement donné, arrivées à
+    l'appui — avec l'intervalle de confiance, qui est la seule façon de
+    savoir si une mauvaise série est une contre-performance ou du bruit.
+    """
+    from . import evaluate as ev
+
+    d = date.fromisoformat(depuis) if depuis else date(2000, 1, 1)
+    j = _jour(jusqua)
+    with db.connect() as conn:
+        if not _table_existe(conn, "pronostic"):
+            raise HTTPException(503, "table pronostic absente")
+        return ev.bilan_production(conn, modele=modele, depuis=d, jusqua=j)
+
+
 # ---------------------------------------------------------------------
 # Page visuelle
 # ---------------------------------------------------------------------

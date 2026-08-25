@@ -192,7 +192,7 @@ def faits(ligne: pd.Series) -> dict:
     if not pd.isna(repos):
         j = int(round(repos))
         out["forme"].append(
-            f"{j} jours depuis sa dernière course"
+            (f"{j} jour" if j <= 1 else f"{j} jours") + " depuis sa dernière course"
             + (" — sortie très fraîche" if j <= 7 else
                (" — longue coupure" if j >= 90 else ""))
         )
@@ -300,8 +300,9 @@ def faits(ligne: pd.Series) -> dict:
     # -- Marge -------------------------------------------------------
     mm = _v(ligne, "v_marge_moy")
     if not pd.isna(mm):
+        unite = "longueur" if mm < 1.5 else "longueurs"
         out["marge"].append(
-            f"battu en moyenne de {mm:.1f} longueur(s) par le cheval qui le précède"
+            f"battu en moyenne de {mm:.1f} {unite} par le cheval qui le précède"
             + (" — arrivées très serrées" if mm < 1.0 else ""))
 
     # -- Conditions --------------------------------------------------

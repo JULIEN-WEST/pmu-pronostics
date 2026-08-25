@@ -9,16 +9,16 @@
 # toutes seules par découverte MQTT depuis le conteneur. Ce package
 # n'ajoute que ce que MQTT ne fournit pas — les commandes et l'alerte.
 #
-# Remplacer 192.168.1.42 par l'adresse de l'hôte Docker.
+# Remplacer 192.168.1.85 par l'adresse de l'hôte Docker.
 
 rest_command:
   pmu_recalculer:
-    url: "http://192.168.1.42:8100/ha/resume"
+    url: "http://192.168.1.85:8100/ha/resume"
     method: GET
     timeout: 30
 
   pmu_sante:
-    url: "http://192.168.1.42:8100/sante"
+    url: "http://192.168.1.85:8100/sante"
     method: GET
     timeout: 10
 
@@ -42,6 +42,51 @@ script:
           notification_id: pmu_rafraichi
 
 automation:
+  # ── La page visuelle, rapatriée DANS Home Assistant ───────────────
+  #
+  # LE PROBLÈME. Home Assistant est servi en HTTPS (Nabu Casa, reverse
+  # proxy). Une carte `iframe` pointant sur http://192.168.1.85:8100/vue
+  # est alors refusée par le navigateur — contenu mixte — et le cadre
+  # reste blanc. Servir l'API en HTTPS ne réglerait rien : un certificat
+  # auto-signé est refusé dans une iframe, silencieusement lui aussi.
+  #
+  # LA SOLUTION. C'est Home Assistant, et non le navigateur, qui va
+  # chercher la page en HTTP côté serveur, et la dépose dans son dossier
+  # `www`. Elle devient alors accessible en /local/pmu/vue.html, sur la
+  # MÊME ORIGINE que Home Assistant, donc en HTTPS. Plus de contenu
+  # mixte, plus de certificat à gérer, et ça marche aussi bien en local
+  # qu'en 4G par Nabu Casa.
+  #
+  # PRÉALABLE, une seule fois :
+  #   Paramètres → Appareils et services → Ajouter une intégration →
+  #   « Downloader » → dossier de téléchargement : www
+  #
+  # ⚠️ Remplacer 192.168.1.85 par l'adresse de l'hôte Docker.
+  - id: pmu_rapatrier_vue
+    alias: 🐎 PMU — rapatrier la page visuelle
+    description: >
+      Télécharge /vue depuis l'API et l'écrit dans www/pmu/vue.html.
+      Toutes les 10 minutes, au démarrage, et dès qu'un nouveau calcul
+      est publié — c'est ce dernier déclencheur qui compte vraiment, les
+      autres ne sont qu'un filet de sécurité.
+    mode: single
+    max_exceeded: silent
+    triggers:
+      - trigger: time_pattern
+        minutes: "/10"
+      - trigger: homeassistant
+        event: start
+      - trigger: state
+        entity_id: sensor.pmu_age_calcul
+    actions:
+      - action: downloader.download_file
+        continue_on_error: true
+        data:
+          url: "http://192.168.1.85:8100/vue"
+          subdir: pmu
+          filename: vue.html
+          overwrite: true
+
   # ── Alerte si la pile décroche ────────────────────────────────────
   - id: pmu_alerte_pile
     alias: 🐎 PMU — alerte pile hors service

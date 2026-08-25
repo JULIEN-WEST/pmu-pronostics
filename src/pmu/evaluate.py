@@ -217,6 +217,161 @@ def rapport(df: pd.DataFrame, cible="y_gagnant", prelevement=PRELEVEMENT_DEFAUT)
     return out
 
 
+# ---------------------------------------------------------------------
+# 5. Bilan de PRODUCTION
+# ---------------------------------------------------------------------
+#
+# Les mesures ci-dessus portent sur la fenêtre de test d'un
+# entraînement. Celle-ci porte sur les pronostics RÉELLEMENT PUBLIÉS,
+# relus dans la table `pronostic` et confrontés aux arrivées. C'est le
+# seul chiffre qui compte, et le seul qui ne puisse pas être flatté par
+# un choix de découpage.
+#
+# Elle répond aussi à la question qu'on se pose en regardant un tableau
+# de bord : « tous mes favoris sont battus, le modèle est-il cassé ? »
+# Sur dix courses, non — on ne peut rien conclure. L'intervalle de
+# confiance affiché le dit à la place de l'intuition.
+
+def _intervalle_binomial(succes: int, n: int) -> tuple[float, float]:
+    """
+    Intervalle de Wilson à 95 %. Plus honnête que l'approximation
+    normale sur les petits effectifs, précisément le cas où l'on est
+    tenté de conclure trop vite.
+    """
+    if n == 0:
+        return (0.0, 1.0)
+    z, p = 1.96, succes / n
+    d = 1 + z * z / n
+    centre = (p + z * z / (2 * n)) / d
+    demi = z * np.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / d
+    return (max(0.0, centre - demi), min(1.0, centre + demi))
+
+
+SQL_BILAN = """
+SELECT c.course_id, c.discipline, c.date_reunion,
+       pr.num_pmu, pr.proba, pr.rang, pr.cote,
+       p.ordre_arrivee,
+       (SELECT count(*) FROM partant px
+         WHERE px.course_id = c.course_id AND px.ordre_arrivee = 1) AS a_un_gagnant
+  FROM pronostic pr
+  JOIN course  c ON c.course_id = pr.course_id
+  JOIN partant p ON p.course_id = pr.course_id AND p.num_pmu = pr.num_pmu
+ WHERE pr.modele = %(modele)s
+   AND c.date_reunion BETWEEN %(depuis)s AND %(jusqua)s
+   AND c.ordre_arrivee IS NOT NULL
+"""
+
+
+def bilan_production(conn, *, modele: str, depuis, jusqua) -> dict:
+    """
+    Le tableau de bord honnête : ce que les pronostics publiés ont donné.
+
+    Renvoie aussi un champ `anomalies`, et il faut le lire EN PREMIER.
+    Une course arrivée dont aucun partant n'a `ordre_arrivee = 1` est un
+    défaut de collecte, pas une contre-performance : elle compterait
+    comme un échec du modèle alors qu'elle ne prouve rien.
+    """
+    import psycopg.rows
+
+    with conn.cursor(row_factory=psycopg.rows.tuple_row) as cur:
+        cur.execute(SQL_BILAN, {"modele": modele, "depuis": depuis, "jusqua": jusqua})
+        colonnes = [d.name for d in cur.description]
+        df = pd.DataFrame(cur.fetchall(), columns=colonnes)
+
+    if df.empty:
+        return {"n_courses": 0, "message": "aucun pronostic confronté à une arrivée"}
+
+    df["proba"] = pd.to_numeric(df["proba"], errors="coerce")
+    df["cote"] = pd.to_numeric(df["cote"], errors="coerce")
+    df["y"] = (pd.to_numeric(df["ordre_arrivee"], errors="coerce") == 1).astype(float)
+
+    # ── Anomalies de collecte, isolées AVANT toute conclusion ──────
+    sans_gagnant = df.loc[df["a_un_gagnant"] == 0, "course_id"].nunique()
+    df = df[df["a_un_gagnant"] > 0]
+    if df.empty:
+        return {"n_courses": 0, "anomalies": {"courses_sans_gagnant": int(sans_gagnant)},
+                "message": "aucune course exploitable : les arrivées ne sont pas "
+                           "renseignées au niveau des partants"}
+
+    par_course = df.groupby("course_id")
+    choix = df.loc[par_course["proba"].idxmax()]
+    n = int(choix["course_id"].nunique())
+    succes = int(choix["y"].sum())
+    bas, haut = _intervalle_binomial(succes, n)
+
+    out = {
+        "modele": modele,
+        "n_courses": n,
+        "n_partants": int(len(df)),
+        "top1_reussites": succes,
+        "top1_taux": round(succes / n, 4),
+        "top1_ic95": [round(bas, 4), round(haut, 4)],
+        "brier": round(float(brier_score_loss(df["y"], df["proba"].clip(1e-9, 1 - 1e-9))), 5),
+        "ece": erreur_calibration(df["y"], df["proba"]),
+        "anomalies": {"courses_sans_gagnant": int(sans_gagnant)},
+    }
+
+    # Le favori du public : la cote la plus basse.
+    avec_cote = df[df["cote"].notna() & (df["cote"] > 1)]
+    if len(avec_cote):
+        fav = avec_cote.loc[avec_cote.groupby("course_id")["cote"].idxmin()]
+        n_m = int(fav["course_id"].nunique())
+        s_m = int(fav["y"].sum())
+        out["marche"] = {
+            "n_courses": n_m, "top1_reussites": s_m,
+            "top1_taux": round(s_m / n_m, 4) if n_m else None,
+            "top1_ic95": [round(x, 4) for x in _intervalle_binomial(s_m, n_m)],
+        }
+
+    out["par_discipline"] = {}
+    for disc, sub in choix.groupby("discipline"):
+        k = int(len(sub))
+        if k < 20:
+            continue
+        r = int(sub["y"].sum())
+        out["par_discipline"][str(disc)] = {
+            "n_courses": k, "top1_taux": round(r / k, 4),
+            "top1_ic95": [round(x, 4) for x in _intervalle_binomial(r, k)],
+        }
+    return out
+
+
+def afficher_bilan(b: dict) -> str:
+    if not b.get("n_courses"):
+        L = ["── Bilan de production " + "─" * 37, "  " + b.get("message", "rien à mesurer")]
+        a = (b.get("anomalies") or {}).get("courses_sans_gagnant")
+        if a:
+            L.append(f"  ⚠ {a} courses arrivées sans aucun partant classé 1ᵉʳ — "
+                     "défaut de collecte")
+        return "\n".join(L)
+
+    L = ["── Bilan de production " + "─" * 37,
+         f"  modèle             {b['modele']:>16}",
+         f"  courses jugées     {b['n_courses']:>16}",
+         f"  favori gagnant     {b['top1_reussites']:>6} / {b['n_courses']:<7}"
+         f"  {b['top1_taux']:>6.1%}",
+         f"  intervalle à 95 %  [{b['top1_ic95'][0]:>5.1%} ; {b['top1_ic95'][1]:>5.1%}]",
+         f"  Brier              {b['brier']:>16.5f}",
+         f"  ECE                {b['ece']:>16.5f}"]
+    m = b.get("marche")
+    if m and m.get("top1_taux") is not None:
+        L.append(f"  favori du public   {m['top1_reussites']:>6} / {m['n_courses']:<7}"
+                 f"  {m['top1_taux']:>6.1%}")
+        L.append("  → si les deux intervalles se chevauchent, l'écart n'est pas établi")
+    a = (b.get("anomalies") or {}).get("courses_sans_gagnant", 0)
+    if a:
+        L.append(f"  ⚠ {a} courses écartées : arrivée connue mais aucun partant "
+                 "classé 1ᵉʳ (défaut de collecte, pas une contre-performance)")
+    if b.get("par_discipline"):
+        L.append("\n  " + f"{'discipline':<14} {'courses':>8} {'réussite':>9} {'IC 95 %':>18}")
+        for d, s in sorted(b["par_discipline"].items()):
+            L.append(f"  {d:<14} {s['n_courses']:>8} {s['top1_taux']:>9.1%} "
+                     f"  [{s['top1_ic95'][0]:>5.1%} ; {s['top1_ic95'][1]:>5.1%}]")
+    L.append("\n  Rappel : sur 10 courses, un modèle à 25 % de réussite finit")
+    L.append("  bredouille une fois sur 18. Dix courses ne prouvent rien.")
+    return "\n".join(L)
+
+
 def afficher(rap: dict) -> str:
     """Rendu texte lisible dans un terminal ou un rapport de mémoire."""
     L = []

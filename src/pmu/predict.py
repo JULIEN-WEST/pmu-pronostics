@@ -277,8 +277,10 @@ def lire_pronostics(conn, jour: date, modele: str = "sans_marche") -> list[dict]
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Pronostics PMU")
-    ap.add_argument("mode", choices=["entrainer", "jour"])
+    ap.add_argument("mode", choices=["entrainer", "jour", "bilan"])
     ap.add_argument("--date", type=lambda s: date.fromisoformat(s))
+    ap.add_argument("--depuis", type=lambda s: date.fromisoformat(s),
+                    help="bilan : début de la période (défaut : tout l'historique)")
     ap.add_argument("--avec-marche", action="store_true",
                     help="entraîne aussi la variante qui voit la cote")
     ap.add_argument("-v", "--verbose", action="store_true")
@@ -294,6 +296,15 @@ def main() -> None:
             entrainer(conn, avec_marche=False, jusqua=args.date)
             if args.avec_marche:
                 entrainer(conn, avec_marche=True, jusqua=args.date)
+        elif args.mode == "bilan":
+            # Ce que les pronostics PUBLIÉS ont donné, arrivées à l'appui.
+            for nom in (("sans_marche", "avec_marche") if args.avec_marche
+                        else (os.environ.get("PMU_MODELE", "sans_marche"),)):
+                b = ev.bilan_production(
+                    conn, modele=nom,
+                    depuis=args.depuis or date(2000, 1, 1),
+                    jusqua=args.date or date.today())
+                print(ev.afficher_bilan(b), "\n")
         else:
             modeles = ("sans_marche", "avec_marche") if args.avec_marche else ("sans_marche",)
             pronostiquer(conn, args.date, modeles=modeles)

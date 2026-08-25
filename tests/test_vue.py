@@ -169,7 +169,7 @@ def test_les_donnees_de_la_base_sont_echappees():
     assert "onerror=alert" not in p
 
     # Dans la charge embarquée, aucun chevron littéral.
-    charge = p.split("const DONNEES=")[1].split("\nconst F")[0]
+    charge = p.split("const DONNEES=")[1].split(";const RAFRAICHIR=")[0]
     assert "<" not in charge and ">" not in charge
     assert "\\u003c" in charge, "l'échappement n'a pas eu lieu"
 

@@ -121,24 +121,37 @@ _CSS = """
   --or:#e0b64d; --barre:#252a32;
   --ombre:0 1px 2px rgba(0,0,0,.4),0 4px 14px rgba(0,0,0,.3);
 }}
-html,body{margin:0;padding:0}
+html,body{margin:0;padding:0;height:100%}
+/* ── LA PAGE NE DÉFILE PAS ────────────────────────────────────────
+   Elle est affichée dans une iframe de hauteur fixe. Si son contenu
+   dépasse, un ascenseur interne apparaît, et un ascenseur dans un
+   cadre lui-même dans une page qui défile est pénible à utiliser.
+   La page occupe donc exactement la hauteur disponible, et c'est le
+   JavaScript qui décide combien de partants tiennent — les autres
+   passent derrière un bouton. Voir `ajuster()`. */
 body{background:var(--fond);color:var(--texte);
   font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
-  padding:14px;-webkit-font-smoothing:antialiased}
+  padding:10px;-webkit-font-smoothing:antialiased;
+  display:flex;flex-direction:column;overflow:hidden}
+body.libre{overflow:auto;height:auto}
 h1,h2,h3{margin:0;font-weight:650;letter-spacing:-.01em}
 .carte{background:var(--carte);border:1px solid var(--trait);
-  border-radius:var(--r);box-shadow:var(--ombre);padding:16px;margin-bottom:14px}
+  border-radius:var(--r);box-shadow:var(--ombre);padding:13px 15px}
+#course{flex:1 1 auto;min-height:0;overflow:hidden}
+#course>.carte{height:100%;overflow:hidden;display:flex;flex-direction:column}
+#classement{min-height:0}
 
 /* ── bandeau ─────────────────────────────────────────── */
-.entete{display:flex;flex-wrap:wrap;align-items:baseline;gap:10px 16px;margin-bottom:14px}
-.entete h1{font-size:19px}
+.entete{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 14px;
+  margin-bottom:9px;flex:0 0 auto}
+.entete h1{font-size:17px}
 .puce{font-size:12px;color:var(--doux);background:var(--barre);
   padding:3px 9px;border-radius:999px;white-space:nowrap}
 .puce.alerte{background:rgba(217,48,37,.14);color:var(--rouge)}
 
 /* ── sélecteur de courses ────────────────────────────── */
-.rail{display:flex;gap:7px;overflow-x:auto;padding:2px 2px 10px;
-  scrollbar-width:thin}
+.rail{display:flex;gap:6px;overflow-x:auto;padding:2px 2px 8px;
+  scrollbar-width:thin;flex:0 0 auto}
 .rail button{flex:0 0 auto;background:var(--carte);color:var(--texte);
   border:1px solid var(--trait);border-radius:11px;padding:7px 11px;
   font:inherit;font-size:13px;cursor:pointer;text-align:left;line-height:1.25;
@@ -159,19 +172,24 @@ h1,h2,h3{margin:0;font-weight:650;letter-spacing:-.01em}
 
 /* ── podium ──────────────────────────────────────────── */
 .podium{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
-  gap:10px;margin:14px 0 4px}
-.marche{border:1px solid var(--trait);border-radius:12px;padding:11px 12px;
+  gap:8px;margin:10px 0 2px;flex:0 0 auto}
+.marche{border:1px solid var(--trait);border-radius:11px;padding:8px 11px;
   background:linear-gradient(180deg,var(--barre) 0,transparent 70%)}
-.marche .place{font-size:11px;color:var(--doux);letter-spacing:.08em;
+.marche .place{font-size:10.5px;color:var(--doux);letter-spacing:.08em;
   text-transform:uppercase}
-.marche .nom{font-weight:650;margin:3px 0 1px;font-size:15px}
-.marche .pc{font-size:26px;font-weight:700;letter-spacing:-.02em}
+.marche .nom{font-weight:650;margin:2px 0 0;font-size:14.5px}
+.marche .pc{font-size:23px;font-weight:700;letter-spacing:-.02em}
 .marche.or{border-color:var(--or)} .marche.or .pc{color:var(--or)}
 
 /* ── tableau du classement ───────────────────────────── */
-.ligne{display:grid;grid-template-columns:30px 1fr 96px;gap:10px;
-  align-items:center;padding:9px 4px;border-top:1px solid var(--trait);
+.ligne{display:grid;grid-template-columns:28px 1fr 92px;gap:10px;
+  align-items:center;padding:7px 4px;border-top:1px solid var(--trait);
   cursor:pointer}
+.ligne.masquee,.podium.masquee{display:none}
+.reste{width:100%;margin-top:8px;background:var(--barre);color:var(--texte);
+  border:1px solid var(--trait);border-radius:10px;padding:7px;font:inherit;
+  font-size:12.5px;cursor:pointer;flex:0 0 auto}
+.reste:hover{border-color:var(--accent)}
 .ligne:hover{background:var(--barre)}
 .ligne .num{font-variant-numeric:tabular-nums;font-weight:650;
   text-align:center;color:var(--doux)}
@@ -188,8 +206,22 @@ h1,h2,h3{margin:0;font-weight:650;letter-spacing:-.01em}
   background:rgba(15,157,88,.15);color:var(--vert);display:inline-block}
 .val.neg{background:var(--barre);color:var(--doux)}
 
-/* ── justification ───────────────────────────────────── */
-.detail{grid-column:1/-1;padding:2px 0 8px 40px}
+/* ── justification, en panneau superposé ──────────────────────────
+   Dépliée en ligne, elle rallongeait la page de 400 px et ramenait
+   l'ascenseur qu'on cherche à supprimer. Elle recouvre donc le cadre :
+   la hauteur totale ne bouge plus, et le détail dispose de toute la
+   place. */
+.feuille{position:fixed;inset:0;background:var(--fond);z-index:9;
+  padding:12px;overflow:auto;display:flex;flex-direction:column;gap:10px}
+.feuille .barre{display:flex;align-items:flex-start;gap:12px}
+.feuille .barre div{flex:1}
+.feuille h3{font-size:17px}
+.feuille .gros{font-size:23px;font-weight:700;letter-spacing:-.02em}
+.feuille .fermer{background:var(--barre);border:1px solid var(--trait);
+  color:var(--texte);border-radius:9px;width:32px;height:32px;font:inherit;
+  font-size:15px;cursor:pointer;flex:0 0 auto}
+.feuille .fermer:hover{border-color:var(--accent)}
+.detail{padding:0}
 .motifs{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px}
 .motif{font-size:12px;border-radius:9px;padding:4px 9px;
   border:1px solid var(--trait);background:var(--barre)}
@@ -248,17 +280,12 @@ function rendreCourse(c){
     </div>`).join("");
 
   const lignes = sel.map((s,i)=>{
-    const cle = c.code+"-"+s.num;
     const val = s.valeur;
     const badge = (val==null) ? "" :
       `<span class="val ${val>0.15?"":"neg"}">${val>0?"+":""}${(val*100).toFixed(0)} %</span>`;
     const arrivee = c.arrivee_connue && s.arrivee
       ? `<span class="puce">arrivé ${s.arrivee}${s.arrivee===1?"ᵉʳ":"ᵉ"}</span>` : "";
-    const detail = ouvert.has(cle) ? `<div class="detail">
-        <div class="motifs">${(s.motifs||[]).map(motif).join("") ||
-          '<span class="vide">Aucun facteur ne se détache nettement.</span>'}</div>
-        ${faits(s.faits||{})}</div>` : "";
-    return `<div class="ligne ${i===0?"top":""}" data-cle="${cle}">
+    return `<div class="ligne ${i===0?"top":""}" data-i="${i}">
         <div class="num">${s.num}</div>
         <div>
           <div class="nom">${E(s.cheval)} ${arrivee}</div>
@@ -271,7 +298,7 @@ function rendreCourse(c){
           <div class="cote">${s.cote!=null?"cote "+s.cote.toFixed(1):"cote —"}</div>
           ${badge}
         </div>
-      </div>${detail}`;
+      </div>`;
   }).join("");
 
   const conf = c.confiance*100;
@@ -287,10 +314,83 @@ function rendreCourse(c){
         c.terrain?" · terrain "+E(c.terrain):""}${
         c.allocation?" · "+Math.round(c.allocation).toLocaleString("fr-FR")+" €":""}</div>
       <div class="podium">${podium}</div>
-      ${lignes}
-      <div class="note">Cliquez un partant pour voir ce qui a pesé sur sa note.
-        L'écart entre le 1ᵉʳ et le 2ᵉ choix vaut ${conf.toFixed(1)} points.</div>
+      <div id="classement">${lignes}</div>
     </div>`;
+}
+
+// ── La justification, en panneau superposé ─────────────────────────
+function ouvrirFeuille(i){
+  const c = DONNEES.courses[courant], s = c.selection[i];
+  const f = document.createElement("div");
+  f.className = "feuille";
+  f.innerHTML = `
+    <div class="barre">
+      <div>
+        <h3>${s.num} · ${E(s.cheval)}</h3>
+        <div class="meta">${E(c.code)} · ${E(c.hippodrome)} — ${E(s.driver||"")}${
+          s.pere?" · par "+E(s.pere):""}</div>
+      </div>
+      <div style="text-align:right;flex:0 0 auto">
+        <div class="gros">${F(s.proba)}</div>
+        <div class="meta">${s.cote!=null?"cote "+s.cote.toFixed(1):"cote —"}</div>
+      </div>
+      <button class="fermer" title="Fermer">✕</button>
+    </div>
+    <div class="motifs">${(s.motifs||[]).map(motif).join("") ||
+      '<span class="vide">Aucun facteur ne se détache nettement dans ce lot.</span>'}</div>
+    ${faits(s.faits||{})}
+    <div class="note">Ces motifs disent ce qui a pesé sur la note dans ce lot
+      précis. Ce sont des associations mesurées, pas des causes.</div>`;
+  f.querySelector(".fermer").onclick = () => f.remove();
+  f.onclick = e => { if (e.target === f) f.remove(); };
+  document.addEventListener("keydown", function esc(e){
+    if (e.key === "Escape") { f.remove(); document.removeEventListener("keydown", esc); }
+  });
+  document.body.appendChild(f);
+}
+
+// ── Ajustement à la hauteur réelle du cadre ────────────────────────
+//
+// On ne peut pas savoir d'avance combien de partants tiennent : la
+// hauteur de l'iframe dépend de l'`aspect_ratio` choisi, de la largeur
+// de la colonne et de l'écran. On mesure donc APRÈS le rendu, et on
+// masque les lignes qui débordent. Le bouton lui-même occupe de la
+// place : il est ajouté avant la mesure finale, sinon il déclencherait
+// à son tour un dépassement d'un cran.
+function ajuster(){
+  if (toutAfficher) return;
+  const zone = document.getElementById("course");
+  const carte = zone && zone.firstElementChild;
+  if (!carte) return;
+  const lignes = [...carte.querySelectorAll(".ligne")];
+  lignes.forEach(l => l.classList.remove("masquee"));
+  const podium = carte.querySelector(".podium");
+  if (podium) podium.classList.remove("masquee");
+  if (carte.scrollHeight <= carte.clientHeight + 2) return;
+
+  // Le podium avant les partants : il REDIT les trois premières lignes
+  // du classement. Dans un cadre serré, il coûte deux partants pour ne
+  // rien apprendre de neuf — c'est donc lui qui saute en premier.
+  if (podium){
+    podium.classList.add("masquee");
+    if (carte.scrollHeight <= carte.clientHeight + 2) return;
+  }
+
+  const bouton = document.createElement("button");
+  bouton.className = "reste";
+  carte.appendChild(bouton);
+
+  let i = lignes.length - 1;
+  // On garde toujours trois partants : en dessous, la carte ne dit plus
+  // rien et mieux vaut un cadre trop court qu'un cadre inutile.
+  while (carte.scrollHeight > carte.clientHeight + 2 && i >= 3){
+    lignes[i].classList.add("masquee"); i--;
+  }
+  const caches = lignes.length - 1 - i;
+  if (caches <= 0){ bouton.remove(); return; }
+  bouton.textContent = `Afficher les ${caches} autres partant`
+    + (caches > 1 ? "s" : "");
+  bouton.onclick = () => { toutAfficher = true; document.body.classList.add("libre"); rendre(); };
 }
 
 function rendre(){
@@ -299,20 +399,48 @@ function rendre(){
     : '<div class="carte vide">Aucune course à afficher.</div>';
   document.querySelectorAll(".rail button").forEach((b,i)=>
     b.classList.toggle("actif", i===courant));
-  document.querySelectorAll(".ligne").forEach(l=>l.onclick=()=>{
-    const k=l.dataset.cle; ouvert.has(k)?ouvert.delete(k):ouvert.add(k); rendre();
-  });
+  document.querySelectorAll(".ligne").forEach(l =>
+    l.onclick = () => ouvrirFeuille(+l.dataset.i));
+  ajuster();
 }
 
-let courant = 0;
+let courant = 0, toutAfficher = false;
 document.querySelectorAll(".rail button").forEach((b,i)=>
-  b.onclick=()=>{courant=i; ouvert.clear(); rendre();});
+  b.onclick=()=>{
+    courant = i; toutAfficher = false;
+    document.body.classList.remove("libre");
+    document.querySelectorAll(".feuille").forEach(f=>f.remove());
+    rendre();
+  });
 rendre();
+// La largeur du cadre change quand la fenêtre change : le nombre de
+// partants qui tiennent change avec elle.
+addEventListener("resize", () => { if (!toutAfficher) rendre(); });
+
+// Rechargement périodique AVEC HORODATAGE dans l'URL.
+//
+// Le paramètre n'est pas décoratif : quand la page est déposée dans le
+// dossier `www` de Home Assistant, elle est servie comme un fichier
+// statique et peut rester en cache dans le navigateur. Recharger la
+// même URL ne garantit donc rien ; changer l'URL, si. On ne recharge
+// pas non plus si une justification est dépliée — ce serait la refermer
+// sous les yeux de celui qui la lit.
+if (RAFRAICHIR > 0) setInterval(() => {
+  if (ouvert.size === 0 && !document.hidden)
+    location.replace(location.pathname + "?t=" + Math.floor(Date.now()/1000));
+}, RAFRAICHIR * 1000);
 """
 
 
-def page(courses: list[dict], *, jour: date, meta: dict | None = None) -> str:
-    """Rend la page complète, prête à servir."""
+def page(courses: list[dict], *, jour: date, meta: dict | None = None,
+         rafraichir: int = 300) -> str:
+    """
+    Rend la page complète, prête à servir.
+
+    `rafraichir` : période d'auto-rechargement en secondes, 0 pour aucun.
+    Utile parce que la page finit souvent figée dans une iframe qu'on ne
+    recharge jamais à la main.
+    """
     meta = meta or {}
     data = _preparer(courses)
     # ⚠️ `json.dumps` n'échappe NI « < » NI « > ». Un cheval nommé
@@ -380,5 +508,5 @@ def page(courses: list[dict], *, jour: date, meta: dict | None = None) -> str:
   Les motifs indiquent ce qui a pesé sur la note dans ce lot précis —
   ce sont des associations mesurées, pas des causes.
 </div>
-<script>const DONNEES={charge};{_JS}</script>
+<script>const DONNEES={charge};const RAFRAICHIR={int(rafraichir)};{_JS}</script>
 </body></html>"""

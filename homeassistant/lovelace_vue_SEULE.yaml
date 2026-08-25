@@ -5,30 +5,38 @@
 # la vue ».
 #
 # ⚠️ Efface TOUT le contenu de l'éditeur avant de coller ceci.
-# ⚠️ Remplace 192.168.1.85 par l'adresse de la machine qui héberge la
-#    pile Docker, aux DEUX endroits marqués « ADRESSE À ADAPTER ».
 #
 # Si tu passes au contraire par l'éditeur brut du tableau de bord
 # entier (celui qui montre « views: »), utilise l'autre fichier,
 # lovelace_vue_pronostics.yaml, qui commence par un tiret.
 #
 # ───────────────────────────────────────────────────────────────────
-# CE QUI CHANGE : LA VUE RICHE EST UNE PAGE, PLUS UNE CARTE MARKDOWN
+# POURQUOI L'IFRAME ÉTAIT VIDE, ET COMMENT C'EST RÉGLÉ
 #
-# Une carte markdown ne sait pas dessiner : elle rend du texte, et une
-# jauge en caractères reste une jauge en caractères. L'API sert
-# désormais une vraie page (/vue) avec barres, podium et surtout la
-# JUSTIFICATION de chaque sélection — forme, chrono, lignée, aptitude,
-# entourage. Elle s'intègre par une carte `iframe`, sans HACS.
+# « Impossible de charger les iframes pointant vers des sites web
+# utilisant http: si Home Assistant est servi via https: ». Ton Home
+# Assistant est en HTTPS, l'API en HTTP : le navigateur refuse le
+# contenu mixte. Servir l'API en HTTPS avec un certificat auto-signé ne
+# réglerait rien — une iframe refuse aussi un certificat non reconnu,
+# et sans message cette fois.
 #
-# ⚠️ LE PIÈGE DE L'IFRAME, à connaître avant de crier à la panne :
-# une page servie en HTTP ne s'affiche PAS dans un Home Assistant
-# ouvert en HTTPS. Le navigateur bloque le contenu mixte, et il le
-# fait SILENCIEUSEMENT — cadre blanc, aucun message.
-#   · accès local http://192.168.1.85:8123     → l'iframe fonctionne
-#   · accès Nabu Casa https://….ui.nabu.casa   → cadre vide
-# D'où les cartes markdown conservées dessous : elles marchent
-# partout et prennent le relais quand l'iframe est bloqué.
+# La page n'est donc plus chargée depuis l'API. C'est Home Assistant
+# qui va la chercher LUI-MÊME, côté serveur, et la dépose dans son
+# dossier `www`. Elle est ensuite servie sur /local/pmu/vue.html —
+# même origine que Home Assistant, donc en HTTPS. Aucun contenu mixte,
+# aucun certificat, et ça marche aussi en 4G par Nabu Casa.
+#
+# DEUX CHOSES À FAIRE AVANT DE COLLER CETTE VUE :
+#
+#   1. Paramètres → Appareils et services → Ajouter une intégration →
+#      « Downloader » → dossier de téléchargement : www
+#
+#   2. Recharger le package pmu.yaml (il contient l'automation
+#      « 🐎 PMU — rapatrier la page visuelle »), puis la lancer une
+#      fois à la main : Paramètres → Automatisations → ⋮ → Exécuter.
+#
+# Tant que ces deux étapes ne sont pas faites, le cadre affichera une
+# erreur 404 : c'est normal, le fichier n'existe pas encore.
 
 type: sections
 max_columns: 3
@@ -50,11 +58,13 @@ sections:
         icon: mdi:horse-variant
 
       - type: iframe
-        # ADRESSE À ADAPTER (1/2)
-        url: http://192.168.1.85:8100/vue
+        # Chemin RELATIF, servi par Home Assistant lui-même : c'est
+        # tout l'intérêt. Ne pas remettre une URL http:// ici, le
+        # navigateur la rejetterait à nouveau.
+        url: /local/pmu/vue.html
         # 100 % = carré. Au-delà, la page est plus haute que large :
         # il faut de la place pour déplier une justification.
-        aspect_ratio: 125%
+        aspect_ratio: 130%
 
   # ═══ Colonne 1 — état de la pile ══════════════════════════════════
   - type: grid
@@ -173,11 +183,17 @@ sections:
                 if a_cote else (base ~ " |")] -%}
           {%- endfor -%}
           {%- set premier = sel[0] if sel else none -%}
-          {%- if premier and premier.motifs -%}
+          {#- `premier.motifs` lèverait UndefinedError tant que le
+              message MQTT retenu date d'avant la version 0.6, où les
+              motifs n'existaient pas. `.get()` renvoie une liste vide
+              au lieu de casser toute la carte. -#}
+          {%- set motifs = premier.get('motifs') if premier else [] -%}
+          {%- if motifs -%}
           {%- set ns.l = ns.l + ["", "**Pourquoi " ~ joli(premier.cheval) ~ " :**"] -%}
-          {%- for m in premier.motifs[:3] -%}
-          {%- set ns.l = ns.l + ["- " ~ ("▲" if m.sens == "+" else "▼") ~ " **" ~ m.titre ~ "** — "
-              ~ ((m.details | default([], true))[:2] | join(" · "))] -%}
+          {%- for m in motifs[:3] -%}
+          {%- set ns.l = ns.l + ["- " ~ ("▲" if m.get('sens') == "+" else "▼")
+              ~ " **" ~ m.get('titre', '') ~ "** — "
+              ~ ((m.get('details') or [])[:2] | join(" · "))] -%}
           {%- endfor -%}
           {%- endif -%}
           {%- set ec = p.confiance | float(0) -%}
@@ -208,32 +224,37 @@ sections:
             | replace('HIPPODROME ', '')) }}{%- endmacro -%}
           {%- set jour = state_attr('sensor.pmu_courses', 'date') -%}
           {%- set prog = state_attr('sensor.pmu_courses', 'programme') or [] -%}
+          {%- set total = states('sensor.pmu_courses') -%}
           {%- set faites = prog | selectattr('arrivee_connue') | list | length -%}
+          {#- Quatre colonnes, pas six. À six, la dernière sortait de
+              l'écran dans une colonne de tableau de bord : l'état de la
+              course et la confiance rejoignent donc la cellule du
+              favori, où ils tiennent sans rien coûter. -#}
           {%- set ns = namespace(l=[
               "## Programme du " ~ ((jour | as_datetime).strftime('%d/%m') if jour else "—"), "",
-              (prog | length) ~ " courses · " ~ faites ~ " déjà courues", "",
-              "| Course | Départ | Hippodrome | Favori du modèle | Conf. | |",
-              "|:-------|-------:|:-----------|:-----------------|:------|:-|"]) -%}
+              total ~ " courses aujourd'hui · " ~ (prog | length) ~ " détaillées ici · "
+                ~ faites ~ " déjà courues", "",
+              "| Course | Départ | Hippodrome | Favori du modèle |",
+              "|:-------|-------:|:-----------|:-----------------|"]) -%}
           {%- for c in prog -%}
           {%- set top = c.selection[0] if c.selection else none -%}
-          {%- set etat = "—" if not top else ("🕐" if not c.arrivee_connue
+          {%- set etat = "" if not top else ("🕐" if not c.arrivee_connue
                 else ("✅" if top.arrivee == 1 else "✖️")) -%}
           {%- set ec = c.confiance | float(0) -%}
           {%- set pts = "●●●" if ec > 0.10 else ("●●" if ec > 0.05 else "●") -%}
-          {%- set choix = "—" if not top else ("**" ~ top.num ~ "** · "
+          {%- set choix = "—" if not top else (etat ~ " **" ~ top.num ~ "** "
                 ~ joli(top.cheval | default("?", true))
-                ~ "  ·  " ~ ((top.proba | float(0)) * 100) | round | int ~ " %") -%}
+                ~ " · " ~ ((top.proba | float(0)) * 100) | round | int ~ " % " ~ pts) -%}
           {%- set ns.l = ns.l + ["| **" ~ c.code ~ "** | "
               ~ ((c.depart | as_datetime | as_local).strftime('%H:%M') if c.depart else "—")
-              ~ " | " ~ lieu(c.hippodrome) ~ " | " ~ choix
-              ~ " | " ~ pts ~ " | " ~ etat ~ " |"] -%}
+              ~ " | " ~ lieu(c.hippodrome) ~ " | " ~ choix ~ " |"] -%}
           {%- endfor -%}
           {%- set ns.l = ns.l + ["",
               "*✅ le favori du modèle a gagné · ✖️ non · 🕐 course à venir."
               ~ " Les points donnent l'écart entre le 1ᵉʳ et le 2ᵉ choix :"
               ~ " ●●● course tranchée, ● course ouverte."
-              ~ " Indicateur visuel seulement : un taux de réussite se lit sur"
-              ~ " plusieurs centaines de courses, pas sur une journée.*"] -%}
+              ~ " Le programme complet est dans le cadre du haut ;"
+              ~ " ce tableau n'en montre que les premières courses.*"] -%}
           {{ ns.l | join('\n') }}
 
   # ═══ Bas de page — lecture et diagnostics ═════════════════════════
@@ -281,10 +302,13 @@ sections:
             name: Favori du modèle
           - entity: sensor.pmu_age_calcul
             name: Âge du calcul
-      # ADRESSE À ADAPTER (2/2) — lien de secours si l'iframe reste vide
       - type: markdown
         text_only: true
         content: >-
-          [Ouvrir la page des pronostics dans un onglet](http://192.168.1.85:8100/vue)
-          — utile si le cadre ci-dessus reste blanc, ce qui arrive quand
-          Home Assistant est ouvert en HTTPS.
+          [Ouvrir la page en plein écran](/local/pmu/vue.html)
+          — même page, sans le cadre.
+
+          Si elle affiche une erreur 404, c'est que le fichier n'a pas
+          encore été rapatrié : vérifier que l'intégration **Downloader**
+          est installée avec `www` comme dossier de téléchargement, puis
+          exécuter l'automatisation *🐎 PMU — rapatrier la page visuelle*.
