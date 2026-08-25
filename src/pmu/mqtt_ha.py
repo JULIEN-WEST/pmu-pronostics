@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 from datetime import date, datetime, timezone
 
 import paho.mqtt.client as mqtt
@@ -71,18 +72,83 @@ CAPTEURS = [
 ]
 
 
+class MqttIndisponible(RuntimeError):
+    pass
+
+
 def _client() -> mqtt.Client:
+    """
+    Connexion au broker, avec attente EFFECTIVE de l'acquittement.
+
+    `connect()` rend la main avant que le broker n'ait répondu. Publier
+    dans la foulée puis se déconnecter fait perdre les messages : ils
+    partent dans une file que personne ne vide. C'est ce qui faisait que
+    la découverte était « publiée » sans qu'aucune entité n'apparaisse
+    dans Home Assistant.
+    """
+    etat: dict = {"code": None}
+
+    def on_connect(client, userdata, flags, reason_code, properties=None):
+        etat["code"] = reason_code
+        if reason_code != 0:
+            log.error("connexion MQTT refusée par %s : %s", HOTE, reason_code)
+
     c = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="pmu-pronostics")
+    c.on_connect = on_connect
     if UTILISATEUR:
         c.username_pw_set(UTILISATEUR, MOTDEPASSE)
     # Testament : si le conteneur meurt, HA passe les entités en indisponible
     # au lieu d'afficher éternellement le dernier pronostic comme s'il était frais.
     c.will_set(T_DISPO, "offline", retain=True)
     c.connect(HOTE, PORT, keepalive=60)
-    return c
+    c.loop_start()
+
+    for _ in range(50):                     # 5 s maximum
+        if c.is_connected():
+            return c
+        if etat["code"] not in (None, 0):
+            break
+        time.sleep(0.1)
+
+    c.loop_stop()
+    c.disconnect()
+    raise MqttIndisponible(
+        f"broker {HOTE}:{PORT} injoignable ou refuse la connexion "
+        f"(code {etat['code']}) — vérifier MQTT_HOST / MQTT_USER / MQTT_PASSWORD"
+    )
 
 
-def publier_decouverte(c: mqtt.Client) -> None:
+def _publier(c: mqtt.Client, topic: str, charge: str, *, retain: bool = True):
+    """
+    Publie en QoS 1 et rend l'objet de suivi.
+
+    QoS 0 ne garantit rien : le message est « envoyé » même si le broker
+    ne l'a jamais reçu. QoS 1 impose un acquittement, qu'on attend ensuite
+    dans `_attendre()`.
+    """
+    return c.publish(topic, charge, qos=1, retain=retain)
+
+
+def _attendre(infos: list, quoi: str) -> None:
+    """Bloque jusqu'à l'acquittement effectif de chaque message."""
+    perdus = 0
+    for info in infos:
+        try:
+            info.wait_for_publish(timeout=5)
+        except (ValueError, RuntimeError):
+            perdus += 1
+        else:
+            if not info.is_published():
+                perdus += 1
+    if perdus:
+        log.warning("%s : %d message(s) sur %d non acquittés par le broker",
+                    quoi, perdus, len(infos))
+    else:
+        log.info("%s : %d message(s) acquittés", quoi, len(infos))
+
+
+def publier_decouverte(c: mqtt.Client) -> list:
+    infos = []
     for cle, nom, icone, unite, tpl in CAPTEURS:
         conf = {
             "name": nom,
@@ -104,8 +170,8 @@ def publier_decouverte(c: mqtt.Client) -> None:
             conf["json_attributes_template"] = "{{ value_json | tojson }}"
         if cle == "prochaine_depart":
             conf["device_class"] = "timestamp"
-        c.publish(f"{PREFIXE}/sensor/pmu_pronostics/{cle}/config",
-                  json.dumps(conf, ensure_ascii=False), retain=True)
+        infos.append(_publier(c, f"{PREFIXE}/sensor/pmu_pronostics/{cle}/config",
+                              json.dumps(conf, ensure_ascii=False)))
 
     binaire = {
         "name": "Pronostics à jour",
@@ -119,9 +185,9 @@ def publier_decouverte(c: mqtt.Client) -> None:
         "payload_off": "ON",
         "device": APPAREIL,
     }
-    c.publish(f"{PREFIXE}/binary_sensor/pmu_pronostics/frais/config",
-              json.dumps(binaire, ensure_ascii=False), retain=True)
-    log.info("découverte MQTT publiée (%d capteurs)", len(CAPTEURS) + 1)
+    infos.append(_publier(c, f"{PREFIXE}/binary_sensor/pmu_pronostics/frais/config",
+                          json.dumps(binaire, ensure_ascii=False)))
+    return infos
 
 
 def construire_charge(conn, jour: date | None = None) -> dict:
@@ -172,6 +238,32 @@ def construire_charge(conn, jour: date | None = None) -> dict:
     }
 
 
+def verifier() -> str:
+    """
+    Test de bout en bout : connexion + publication acquittée.
+
+    Se contenter de vérifier la connexion ne suffit pas. Un broker peut
+    accepter la connexion puis refuser silencieusement les écritures sur
+    `homeassistant/#` si une liste de contrôle d'accès est en place — la
+    découverte part alors dans le vide, sans la moindre erreur.
+
+    Seul un acquittement en QoS 1 prouve que le message est bien arrivé.
+    """
+    c = _client()
+    try:
+        info = _publier(c, f"{BASE}/verification", "ping", retain=False)
+        info.wait_for_publish(timeout=5)
+        if not info.is_published():
+            raise MqttIndisponible(
+                f"connecté à {HOTE} mais la publication n'est pas acquittée — "
+                "l'utilisateur MQTT n'a probablement pas le droit d'écrire"
+            )
+        return f"{HOTE}, écriture confirmée"
+    finally:
+        c.loop_stop()
+        c.disconnect()
+
+
 def publier_amorcage(depuis: date, jusqua: date) -> None:
     """
     Signale à Home Assistant que le rattrapage initial tourne.
@@ -181,10 +273,9 @@ def publier_amorcage(depuis: date, jusqua: date) -> None:
     ressemble à une panne.
     """
     c = _client()
-    c.loop_start()
     try:
-        publier_decouverte(c)
-        c.publish(T_ETAT, json.dumps({
+        infos = publier_decouverte(c)
+        infos.append(_publier(c, T_ETAT, json.dumps({
             "date": date.today().isoformat(),
             "modele": MODELE,
             "courses": 0,
@@ -195,9 +286,9 @@ def publier_amorcage(depuis: date, jusqua: date) -> None:
                        "Compter 1 à 2 heures, une seule fois.",
             "prochaine": None,
             "programme": [],
-        }, ensure_ascii=False), retain=True)
-        c.publish(T_DISPO, "online", retain=True)
-        log.info("amorçage signalé à Home Assistant")
+        }, ensure_ascii=False)))
+        infos.append(_publier(c, T_DISPO, "online"))
+        _attendre(infos, "découverte + amorçage")
     finally:
         c.loop_stop()
         c.disconnect()
@@ -205,9 +296,8 @@ def publier_amorcage(depuis: date, jusqua: date) -> None:
 
 def publier(jour: date | None = None) -> dict:
     c = _client()
-    c.loop_start()
     try:
-        publier_decouverte(c)
+        infos = publier_decouverte(c)
         with db.connect() as conn:
             charge = construire_charge(conn, jour)
 
@@ -222,9 +312,10 @@ def publier(jour: date | None = None) -> dict:
             log.warning("charge utile réduite à %d octets (programme sans sélections)",
                         len(brut.encode()))
 
-        c.publish(T_ETAT, brut, retain=True)
-        c.publish(T_DISPO, "online", retain=True)
-        log.info("publié : %d courses, %d octets", charge["courses"], len(brut.encode()))
+        infos.append(_publier(c, T_ETAT, brut))
+        infos.append(_publier(c, T_DISPO, "online"))
+        _attendre(infos, f"publication de {charge['courses']} courses "
+                         f"({len(brut.encode())} octets)")
         return charge
     finally:
         c.loop_stop()

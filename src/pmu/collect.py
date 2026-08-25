@@ -136,8 +136,11 @@ def collecte_jour(conn, client: PmuClient, jour: date, *, avec_perfs: bool = Tru
         if hip:
             db.upsert_hippodrome(conn, hip)
         r = nz.parse_reunion(raw_reunion)
-        if r["date_reunion"] is None:
-            r["date_reunion"] = jour
+        # Ceinture ET bretelles : on a DEMANDÉ le programme de `jour`,
+        # c'est donc `jour` la date de référence. Ne pas dépendre d'un
+        # horodatage à retraduire en fuseau — la source d'autorité est
+        # l'URL qu'on vient d'appeler.
+        r["date_reunion"] = jour
         if r["num_officiel"] is None:
             continue
         db.upsert_reunion(conn, r)

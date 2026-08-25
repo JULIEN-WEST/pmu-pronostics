@@ -122,13 +122,12 @@ def diagnostic(client: PmuClient) -> bool:
     # -- MQTT ------------------------------------------------------
     if MQTT_ACTIF:
         try:
-            c = mqtt_ha._client()
-            c.disconnect()
-            lignes.append(f"BROKER MQTT      ..... OK  ({mqtt_ha.HOTE})")
+            detail = mqtt_ha.verifier()
+            lignes.append(f"BROKER MQTT      ..... OK  ({detail})")
         except Exception as exc:  # noqa: BLE001
             lignes.append("BROKER MQTT      ..... ECHEC")
-            lignes.append(f"   {str(exc)[:70]}")
-            lignes.append("   -> verifier MQTT_HOST / MQTT_USER / MQTT_PASSWORD")
+            for morceau in str(exc).split(" — "):
+                lignes.append(f"   {morceau[:70]}")
             lignes.append("   -> la pile fonctionne quand meme, sans entites HA")
     else:
         lignes.append("BROKER MQTT      ..... DESACTIVE (MQTT_HOST vide)")
@@ -402,11 +401,18 @@ def _preparer_base() -> bool:
     chemin = os.environ.get("PMU_SCHEMA", "sql/001_schema.sql")
     derniere: Exception | None = None
 
+    jeton_reset = os.environ.get("PMU_RESET", "").strip()
+
     for tentative in range(12):
         try:
             with db.connect() as conn:
+                remis_a_zero = db.reinitialiser(conn, jeton_reset)
                 db.apply_schema(conn, chemin)
                 conn.execute(SQL_TABLE)
+                if remis_a_zero:
+                    # Consigné APRÈS recréation du schéma, sinon la trace
+                    # partirait avec la table qu'on vient de supprimer.
+                    db.journal(conn, "reset", jeton_reset, "OK")
                 conn.commit()
             return True
         except psycopg.OperationalError as exc:

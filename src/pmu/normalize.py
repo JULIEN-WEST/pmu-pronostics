@@ -17,6 +17,12 @@ import re
 import unicodedata
 from datetime import date, datetime, timezone
 from typing import Any
+from zoneinfo import ZoneInfo
+
+# Les courses françaises sont datées en heure de Paris. Passer par une
+# vraie base de fuseaux plutôt qu'un décalage figé : +1 h en hiver,
+# +2 h en été, et le basculement se fait tout seul.
+FUSEAU_COURSES = ZoneInfo("Europe/Paris")
 
 # ---------------------------------------------------------------------
 # Normalisation de libellés
@@ -64,8 +70,31 @@ def ms_to_dt(value: Any) -> datetime | None:
 
 
 def ms_to_date(value: Any) -> date | None:
+    """
+    Date CALENDAIRE d'un horodatage PMU.
+
+    ⚠️ À lire en heure de Paris, jamais en UTC.
+
+    Les champs de date du PMU (`dateReunion`, `date` d'une course passée)
+    valent MINUIT heure locale. En été, minuit à Paris, c'est 22 h 00 UTC
+    la VEILLE. Lus en UTC, ils renvoient donc systématiquement le jour
+    précédent, et toute la base se décale d'un jour :
+
+        1787608800000  lu en UTC   -> 2026-08-24  ✗
+                       lu en Paris -> 2026-08-25  ✓
+
+    Le symptôme est sournois : la collecte annonce « 40 courses » pour le
+    jour J, elles sont rangées en J−1, et le calcul des pronostics du
+    jour J ne trouve plus rien. Le PMU fournit d'ailleurs son
+    `timezoneOffset` dans la réponse — c'était l'indice.
+
+    Les horodatages de DÉPART (`heure_depart`) ne sont pas concernés :
+    ce sont de vrais instants, stockés en timestamptz, et c'est eux —
+    pas cette date — que le calcul des features utilise pour l'ordre
+    chronologique. La fuite de données n'a donc jamais été en cause.
+    """
     dt = ms_to_dt(value)
-    return dt.date() if dt else None
+    return dt.astimezone(FUSEAU_COURSES).date() if dt else None
 
 
 def cents_to_eur(value: Any) -> float | None:

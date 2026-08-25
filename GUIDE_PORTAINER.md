@@ -147,9 +147,12 @@ développement → YAML → Recharger toute la configuration*.
 |---|---|---|
 | `required variable POSTGRES_PASSWORD is missing` | La variable n'a pas été enregistrée. | Stack → *Editor* → remplir → *Update the stack*. |
 | `failed to read dockerfile` / `no such file` | Les fichiers sont dans un sous-dossier sur GitHub. | Vérifie que `docker-compose.yml` est à la racine du dépôt. Sinon refais l'étape 1. |
-| `BROKER MQTT ..... ECHEC` | Mauvaise adresse ou identifiants manquants. | Corrige les variables `MQTT_*`. La pile tourne quand même, sans entités HA. |
+| `BROKER MQTT ..... ECHEC` | Mauvaise adresse, identifiants manquants, ou droits d'écriture refusés. | Corrige les variables `MQTT_*`. Le message précise s'il s'agit d'un refus de connexion ou d'un refus d'écriture. La pile tourne quand même, sans entités HA. |
+| Les capteurs `sensor.pmu_*` n'existent pas dans HA | La découverte n'est pas arrivée, ou HA ne l'a pas traitée. | Dans HA : *Paramètres → Appareils et services → MQTT → Configurer → Écouter un sujet*, saisir `homeassistant/sensor/pmu_pronostics/#`. Les messages étant retenus, ils s'affichent immédiatement s'ils sont bien sur le broker — le problème est alors côté HA, pas côté pile. |
 | `API PMU ..... ECHEC` | L'API du PMU a changé de forme. | Le conteneur se met en veille au lieu de boucler. Copie-moi le message. |
 | `PAS ASSEZ DE DONNEES POUR ENTRAINER` | Moins de 15 000 partants récupérés. | Rien à faire : il continue à collecter et réessaiera seul. Pour accélérer, mets `PMU_BACKFILL_JOURS` à `60`. |
+| `pull access denied for pmu-pronostics` | La case *Re-pull image* était cochée. | Décoche-la et reclique *Pull and redeploy*. L'image se construit localement, elle n'est dans aucun registre. |
+| `schéma obsolète … recréation automatique` | La base venait d'une version antérieure et était vide. | Rien à faire, c'est le message normal : elle a été recréée au bon format. |
 
 ---
 
@@ -164,7 +167,16 @@ Si la machine redémarre, la pile repart seule et reprend où elle en
 en base.
 
 **Mettre à jour** : renvoie les fichiers sur GitHub, puis Stacks → `pmu` →
-*Pull and redeploy*. Les données sont conservées.
+*Pull and redeploy*.
+
+> ⚠️ **Ne coche JAMAIS « Re-pull image ».** L'image est construite sur ta
+> machine à partir du Dockerfile ; elle n'existe dans aucun registre
+> public. Cocher cette case fait chercher `pmu-pronostics` sur Docker Hub,
+> où elle n'est évidemment pas, et le déploiement échoue sur
+> `pull access denied`. Le bouton seul suffit : il récupère le dépôt et
+> reconstruit.
+
+Les volumes sont conservés : base et modèles survivent.
 
 ---
 

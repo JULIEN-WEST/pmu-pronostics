@@ -8,6 +8,11 @@
 # d'après le nom de la stack. En déclarer un second provoque des
 # conteneurs orphelins à chaque redéploiement.
 #
+# ⚠️ Le numéro de version de l'image (pmu-pronostics:0.4) change à chaque
+# livraison. C'est volontaire : Docker réutilise une image déjà présente
+# sans la reconstruire, donc sans un nouveau tag, un redéploiement
+# relancerait l'ANCIEN code sans rien signaler.
+#
 # ⚠️ Pas de fichier .env non plus : sur une stack Git, Portainer n'en lit
 # aucun. Les variables se saisissent dans son interface (voir
 # GUIDE_PORTAINER.md). C'est d'ailleurs mieux : les mots de passe ne
@@ -46,7 +51,12 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: pmu-pronostics:0.1
+    image: pmu-pronostics:0.4
+    # Force la construction locale au lieu d'une tentative de
+    # téléchargement. Sans ça, Portainer cherche « pmu-pronostics » dans
+    # un registre public, ne le trouve évidemment pas, et échoue sur
+    # « pull access denied ». L'image n'existe que sur ta machine.
+    pull_policy: build
     restart: unless-stopped
     depends_on:
       db:
@@ -54,6 +64,11 @@ services:
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER:-pmu}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-pmu}
       TZ: ${TZ:-Europe/Paris}
+      # Réinitialisation complète de la base, une fois par valeur de jeton.
+      # Laisser la variable en place ne réinitialise PAS à chaque
+      # redémarrage : le jeton est consigné après application. Pour
+      # repartir de zéro plus tard, changer simplement sa valeur.
+      PMU_RESET: ${PMU_RESET:-}
       # Amorçage automatique au premier démarrage : le conteneur rattrape
       # l'historique puis entraîne son premier modèle, sans commande à
       # taper. Mettre 0 pour tout piloter à la main.
@@ -75,7 +90,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: pmu-pronostics:0.1
+    image: pmu-pronostics:0.4
+    pull_policy: build
     restart: unless-stopped
     depends_on:
       db:

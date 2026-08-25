@@ -173,6 +173,66 @@ def test_une_erreur_de_config_n_est_pas_prise_pour_une_base_lente():
 
 
 @pytestmark_db
+def test_reinitialisation_ne_s_applique_qu_une_fois():
+    """
+    Le point critique : laisser `PMU_RESET` en place dans la stack ne doit
+    PAS vider la base à chaque redémarrage du conteneur. Sans cette
+    garantie, la variable serait un piège à retardement.
+    """
+    import os
+    from pmu.planificateur import _preparer_base
+
+    os.environ["PMU_RESET"] = "test-2026-08-25"
+    try:
+        assert _preparer_base() is True
+        with db.connect(DSN) as conn:
+            conn.execute(
+                "INSERT INTO pmu.hippodrome (code, libelle_long) VALUES ('VIN', 'Vincennes')"
+            )
+            conn.commit()
+
+        # Deuxième démarrage, même jeton : la donnée doit survivre.
+        assert _preparer_base() is True
+        with db.connect(DSN) as conn:
+            n = conn.execute("SELECT count(*) AS n FROM pmu.hippodrome").fetchone()["n"]
+            assert n == 1, "la base a été vidée une seconde fois"
+
+        # Jeton différent : là, on réinitialise.
+        os.environ["PMU_RESET"] = "test-2026-08-26"
+        assert _preparer_base() is True
+        with db.connect(DSN) as conn:
+            n = conn.execute("SELECT count(*) AS n FROM pmu.hippodrome").fetchone()["n"]
+            assert n == 0, "le nouveau jeton n'a pas déclenché la réinitialisation"
+            conn.execute("DROP SCHEMA IF EXISTS pmu CASCADE")
+            conn.commit()
+    finally:
+        os.environ.pop("PMU_RESET", None)
+
+
+@pytestmark_db
+def test_sans_jeton_aucune_reinitialisation():
+    """Absence de PMU_RESET = on ne touche à rien."""
+    import os
+    from pmu.planificateur import _preparer_base
+
+    os.environ.pop("PMU_RESET", None)
+    assert _preparer_base() is True
+    with db.connect(DSN) as conn:
+        conn.execute(
+            "INSERT INTO pmu.hippodrome (code, libelle_long) VALUES ('ENG', 'Enghien')"
+        )
+        conn.commit()
+    assert _preparer_base() is True
+    with db.connect(DSN) as conn:
+        n = conn.execute(
+            "SELECT count(*) AS n FROM pmu.hippodrome WHERE code = 'ENG'"
+        ).fetchone()["n"]
+        assert n == 1
+        conn.execute("DROP SCHEMA IF EXISTS pmu CASCADE")
+        conn.commit()
+
+
+@pytestmark_db
 def test_un_echec_ne_pose_pas_le_drapeau():
     """
     Si l'entraînement échoue, l'amorçage doit rester « à faire » pour être

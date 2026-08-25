@@ -43,6 +43,39 @@ def apply_schema(conn, path: str = "sql/001_schema.sql") -> None:
     conn.commit()
 
 
+def reinitialiser(conn, jeton: str) -> bool:
+    """
+    Repart d'une base vide, une seule fois par `jeton`.
+
+    Sert quand une correction rend l'historique déjà collecté inutilisable
+    — par exemple le décalage d'un jour des dates de réunion. Supprimer un
+    volume Docker depuis Portainer est laborieux et facile à rater ; une
+    variable d'environnement l'est beaucoup moins.
+
+    Le jeton (une date, un numéro de version, n'importe quelle chaîne) est
+    consigné dans le journal après application. Tant qu'il ne change pas,
+    les redémarrages suivants ne réinitialisent plus rien : laisser la
+    variable en place ne détruit donc pas la base à chaque relance.
+    """
+    if not jeton:
+        return False
+    try:
+        if deja_collecte(conn, "reset", jeton):
+            return False
+    except Exception:  # noqa: BLE001 — schéma absent au tout premier démarrage
+        conn.rollback()
+
+    log.warning(
+        "PMU_RESET=%s : réinitialisation complète de la base demandée. "
+        "Toutes les données collectées sont effacées, la collecte va reprendre "
+        "de zéro.", jeton
+    )
+    conn.execute("DROP SCHEMA IF EXISTS pmu CASCADE")
+    conn.execute("CREATE SCHEMA pmu")
+    conn.commit()
+    return True
+
+
 def _verifier_schema(conn) -> None:
     """
     Migration automatique quand elle est sans risque.
