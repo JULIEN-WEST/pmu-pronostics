@@ -199,10 +199,36 @@ def test_le_pronostic_perime_est_signale():
     assert "puce alerte" in vieux, "un pronostic de 51 h doit être signalé"
 
 
-def test_le_favori_gagnant_est_marque():
+def test_le_verdict_a_trois_etats():
+    """
+    Gagnant, placé à un rang connu, ou arrivée non renseignée. Le
+    troisième état est celui qui manquait : afficher « battu » quand la
+    place est simplement inconnue a fait croire pendant deux jours que
+    le modèle se trompait sur toutes les courses.
+    """
     gagne = _course(arrivee_connue=True)
     gagne["selection"][0]["arrivee"] = 1
     perdu = _course(arrivee_connue=True)
     perdu["selection"][0]["arrivee"] = 6
+    trou = _course(arrivee_connue=True)
+    trou["selection"][0]["arrivee"] = None
+    avenir = _course(arrivee_connue=False)
+
     assert "favori gagnant" in vue.page([gagne], jour=date(2026, 8, 25))
-    assert "favori battu" in vue.page([perdu], jour=date(2026, 8, 25))
+    # Le rang exact, pas un « battu » qui mettrait la 2e et la 12e
+    # dans le même sac.
+    assert "favori 6" in vue.page([perdu], jour=date(2026, 8, 25))
+    assert "arrivée non renseignée" in vue.page([trou], jour=date(2026, 8, 25))
+
+    # Une course à venir n'a aucun verdict.
+    p = vue.page([avenir], jour=date(2026, 8, 25))
+    for interdit in ("favori gagnant", "arrivée non renseignée"):
+        assert interdit not in p.split("const DONNEES=")[0]
+
+
+def test_une_course_sous_le_seuil_est_mise_en_retrait():
+    """L'abstention doit se voir dans le rail, pas seulement dans la carte."""
+    muette = _course(publiable=False)
+    parlante = _course(publiable=True)
+    assert 'class="muette"' in vue.page([muette], jour=date(2026, 8, 25))
+    assert 'class=""' in vue.page([parlante], jour=date(2026, 8, 25))

@@ -172,6 +172,9 @@ h1,h2,h3{margin:0;font-weight:650;letter-spacing:-.01em}
    on lit « La Capellefavori battu ». */
 .rail span{display:block;color:var(--doux);font-size:11px}
 .rail .ok{color:var(--vert)} .rail .ko{color:var(--rouge)}
+/* Troisième état : arrivée connue mais place du favori absente. Ce
+   n'est pas un échec du modèle, c'est une donnée manquante. */
+.rail .inconnu{color:var(--or)}
 /* Course sous le seuil de confiance : visible, mais en retrait. */
 .rail button.muette{opacity:.5}
 
@@ -443,6 +446,31 @@ if (RAFRAICHIR > 0) setInterval(() => {
 """
 
 
+def _verdict(c: dict) -> str:
+    """
+    Verdict d'une course passée, affiché sous son code dans le rail.
+
+    ⚠️ TROIS ÉTATS, PAS DEUX. Une arrivée connue au niveau de la course
+    ne veut pas dire que la place du favori l'est : quand la propagation
+    vers les partants n'a pas eu lieu, `arrivee` vaut None. Le rendre
+    « favori battu » a fait croire pendant deux jours que le modèle se
+    trompait sur absolument tout — alors qu'il manquait une donnée.
+
+    Et quand la place est connue, l'annoncer : « favori 4ᵉ » se lit
+    beaucoup mieux qu'un « battu » qui met la deuxième place et la
+    douzième dans le même sac.
+    """
+    if not c.get("arrivee_connue"):
+        return ""
+    sel = c.get("selection") or []
+    place = sel[0].get("arrivee") if sel else None
+    if place is None:
+        return '<span class="inconnu">arrivée non renseignée</span>'
+    if place == 1:
+        return '<span class="ok">favori gagnant</span>'
+    return f'<span class="ko">favori {place}ᵉ</span>'
+
+
 def page(courses: list[dict], *, jour: date, meta: dict | None = None,
          rafraichir: int = 300) -> str:
     """
@@ -469,11 +497,10 @@ def page(courses: list[dict], *, jour: date, meta: dict | None = None,
 
     if data:
         rail = "".join(
-            f'<button><b>{html.escape(c["code"] or "")}</b>'
+            f'<button class="{"" if c["publiable"] else "muette"}">'
+            f'<b>{html.escape(c["code"] or "")}</b>'
             f'<span>{html.escape(c["heure"])} · {html.escape(c["hippodrome"])}</span>'
-            + (f'<span class="{"ok" if (c["selection"] and c["selection"][0]["arrivee"] == 1) else "ko"}">'
-               f'{"favori gagnant" if (c["selection"] and c["selection"][0]["arrivee"] == 1) else "favori battu"}</span>'
-               if c["arrivee_connue"] else "")
+            + _verdict(c)
             + "</button>"
             for c in data
         )
