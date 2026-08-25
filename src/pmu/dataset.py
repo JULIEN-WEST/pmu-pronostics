@@ -55,6 +55,38 @@ cote_ouv AS (
       FROM cote co
      WHERE co.type_pari IN ('SIMPLE_GAGNANT', 'E_SIMPLE_GAGNANT')
      ORDER BY co.course_id, co.num_pmu, co.releve_le ASC
+),
+-- ── LA TRAJECTOIRE DE LA COTE ────────────────────────────────────────
+-- Jusqu'ici on ne lisait que deux points : l'ouverture et la clôture.
+-- La série complète en dit bien plus. Une cote qui s'effondre dans le
+-- dernier quart d'heure, c'est de l'argent qui rentre tard, souvent le
+-- mieux informé. Une cote qui oscille, c'est un lot que personne
+-- n'arrive à départager.
+cote_serie AS (
+    SELECT co.course_id, co.num_pmu,
+           count(*)                              AS cote_n,
+           min(co.rapport)                       AS cote_min,
+           max(co.rapport)                       AS cote_max,
+           stddev_samp(ln(nullif(co.rapport, 0))) AS cote_ecart_type
+      FROM cote co
+      JOIN course c ON c.course_id = co.course_id
+     WHERE co.type_pari IN ('SIMPLE_GAGNANT', 'E_SIMPLE_GAGNANT')
+       AND co.rapport > 0
+       AND (c.heure_depart IS NULL OR co.releve_le <= c.heure_depart)
+     GROUP BY co.course_id, co.num_pmu
+),
+-- Dernier relevé à T-15 min : le point de comparaison qui isole le
+-- mouvement de la toute fin. ⚠️ Aucune fuite : c'est antérieur au
+-- départ, donc connu au moment où l'on pronostique.
+cote_avant AS (
+    SELECT DISTINCT ON (co.course_id, co.num_pmu)
+           co.course_id, co.num_pmu, co.rapport AS cote_t15
+      FROM cote co
+      JOIN course c ON c.course_id = co.course_id
+     WHERE co.type_pari IN ('SIMPLE_GAGNANT', 'E_SIMPLE_GAGNANT')
+       AND c.heure_depart IS NOT NULL
+       AND co.releve_le <= c.heure_depart - interval '15 minutes'
+     ORDER BY co.course_id, co.num_pmu, co.releve_le DESC
 )
 SELECT
     c.course_id, c.heure_depart, c.date_reunion, c.num_reunion, c.num_ordre,
@@ -79,6 +111,14 @@ SELECT
     -- ligne courante. `colonnes_features()` les refuse explicitement.
     p.reduction_km_ms, p.temps_officiel_ms, p.distance_cheval_precedent,
     cf.cote_finale, cv.cote_ouverture,
+    -- Conditions d'engagement : déjà collectées, jamais lues jusqu'ici.
+    -- Le pénétromètre est une MESURE du terrain, là où `etat_terrain`
+    -- n'est qu'un adjectif — « bon » ne veut pas dire la même chose à
+    -- Vincennes et à Cagnes.
+    c.penetrometre, c.categorie_particularite, c.categorie_statut,
+    c.conditions, c.condition_age, c.condition_sexe, c.corde,
+    c.nombre_declares_partants,
+    cs.cote_n, cs.cote_min, cs.cote_max, cs.cote_ecart_type, ca.cote_t15,
     'direct'::text     AS source
 FROM partant p
 JOIN course     c  ON c.course_id = p.course_id
@@ -87,8 +127,10 @@ LEFT JOIN hippodrome h ON h.code = r.hippodrome_code
 LEFT JOIN cheval    ch ON ch.id_cheval = p.id_cheval
 LEFT JOIN personne  pd ON pd.id = p.id_driver
 LEFT JOIN personne  pe ON pe.id = p.id_entraineur
-LEFT JOIN cote_fin  cf ON cf.course_id = p.course_id AND cf.num_pmu = p.num_pmu
-LEFT JOIN cote_ouv  cv ON cv.course_id = p.course_id AND cv.num_pmu = p.num_pmu
+LEFT JOIN cote_fin   cf ON cf.course_id = p.course_id AND cf.num_pmu = p.num_pmu
+LEFT JOIN cote_ouv   cv ON cv.course_id = p.course_id AND cv.num_pmu = p.num_pmu
+LEFT JOIN cote_serie cs ON cs.course_id = p.course_id AND cs.num_pmu = p.num_pmu
+LEFT JOIN cote_avant ca ON ca.course_id = p.course_id AND ca.num_pmu = p.num_pmu
 WHERE c.date_reunion BETWEEN %(depuis)s AND %(jusqua)s
 """
 
@@ -155,6 +197,19 @@ SELECT
     pp.distance_avec_precedent AS distance_cheval_precedent,
     NULL::numeric      AS cote_finale,
     NULL::numeric      AS cote_ouverture,
+    NULL::numeric      AS penetrometre,
+    NULL::text         AS categorie_particularite,
+    NULL::text         AS categorie_statut,
+    NULL::text         AS conditions,
+    NULL::text         AS condition_age,
+    NULL::text         AS condition_sexe,
+    NULL::text         AS corde,
+    NULL::smallint     AS nombre_declares_partants,
+    NULL::bigint       AS cote_n,
+    NULL::numeric      AS cote_min,
+    NULL::numeric      AS cote_max,
+    NULL::double precision AS cote_ecart_type,
+    NULL::numeric      AS cote_t15,
     'importe'::text    AS source
 FROM performance_passee pp
 LEFT JOIN cheval ch ON ch.id_cheval = pp.id_cheval

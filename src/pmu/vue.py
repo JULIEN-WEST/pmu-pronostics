@@ -100,6 +100,10 @@ def _preparer(courses: list[dict]) -> list[dict]:
             "partants": c.get("partants") or len(sel),
             "heure": heure, "confiance": c.get("confiance") or 0,
             "arrivee_connue": bool(c.get("arrivee_connue")),
+            # Faux = le modèle n'a rien vu de net. On affiche quand même
+            # la course, mais on le dit : masquer reviendrait à cacher
+            # ses échecs, et le taux de réussite ne serait plus lisible.
+            "publiable": bool(c.get("publiable", True)),
             "selection": sel,
         })
     return out
@@ -148,6 +152,10 @@ h1,h2,h3{margin:0;font-weight:650;letter-spacing:-.01em}
 .puce{font-size:12px;color:var(--doux);background:var(--barre);
   padding:3px 9px;border-radius:999px;white-space:nowrap}
 .puce.alerte{background:rgba(217,48,37,.14);color:var(--rouge)}
+/* Classe distincte de `.alerte` : une course sous le seuil n'est pas
+   une panne, et confondre les deux rendrait l'alerte de fraîcheur
+   indétectable — un test l'a montré. */
+.puce.seuil{background:rgba(200,150,30,.16);color:var(--or)}
 
 /* ── sélecteur de courses ────────────────────────────── */
 .rail{display:flex;gap:6px;overflow-x:auto;padding:2px 2px 8px;
@@ -164,6 +172,8 @@ h1,h2,h3{margin:0;font-weight:650;letter-spacing:-.01em}
    on lit « La Capellefavori battu ». */
 .rail span{display:block;color:var(--doux);font-size:11px}
 .rail .ok{color:var(--vert)} .rail .ko{color:var(--rouge)}
+/* Course sous le seuil de confiance : visible, mais en retrait. */
+.rail button.muette{opacity:.5}
 
 /* ── en-tête de course ───────────────────────────────── */
 .titre{display:flex;flex-wrap:wrap;align-items:baseline;gap:8px 14px}
@@ -308,6 +318,7 @@ function rendreCourse(c){
         <h2>${E(c.code)} · ${E(c.hippodrome)}</h2>
         <span class="puce">${E(c.heure)}</span>
         <span class="puce">confiance ${niveau}</span>
+        ${c.publiable===false?'<span class="puce seuil">sous le seuil de confiance</span>':""}
       </div>
       <div class="meta">${E(c.libelle)} — ${E(c.discipline)} ·
         ${c.distance} m · ${c.partants} partants${

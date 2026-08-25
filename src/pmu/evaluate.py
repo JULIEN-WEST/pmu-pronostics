@@ -218,6 +218,112 @@ def rapport(df: pd.DataFrame, cible="y_gagnant", prelevement=PRELEVEMENT_DEFAUT)
 
 
 # ---------------------------------------------------------------------
+# 4 bis. Abstention — savoir se taire
+# ---------------------------------------------------------------------
+#
+# Un modèle qui pronostique les quarante courses du jour se trompe sur
+# les trois quarts, et c'est normal : il y a une seule bonne réponse
+# parmi quatorze. Mais toutes les courses ne se valent pas. Quand le
+# modèle détache nettement un partant, il a vu quelque chose ; quand il
+# donne 9 %, 9 % et 8 % aux trois premiers, il n'a rien vu du tout et
+# le dire serait plus honnête que de désigner quelqu'un.
+#
+# `ecart_top2` — la distance entre le 1ᵉʳ et le 2ᵉ choix — mesure
+# exactement ça. Reste à savoir à partir de quelle valeur le modèle
+# mérite d'être écouté. On ne le décide pas : on le mesure.
+
+# En dessous, une bande n'a pas assez de courses pour qu'on lui fasse
+# dire quoi que ce soit.
+MIN_COURSES_BANDE = 60
+
+
+def bandes_confiance(df: pd.DataFrame, *, cible="y_gagnant", n_bandes=5) -> pd.DataFrame:
+    """
+    Réussite du favori du modèle, tranche de confiance par tranche.
+
+    `df` doit contenir course_id, proba, ecart_top2 et la cible — donc
+    une fenêtre de test déjà notée.
+    """
+    if "ecart_top2" not in df.columns or df.empty:
+        return pd.DataFrame()
+
+    par_course = df.groupby("course_id")
+    favoris = df.loc[par_course["proba"].idxmax()].copy()
+    if len(favoris) < n_bandes * 2:
+        return pd.DataFrame()
+
+    favoris["bande"] = pd.qcut(favoris["ecart_top2"], q=n_bandes, duplicates="drop")
+    lignes = []
+    for bande, sub in favoris.groupby("bande", observed=True):
+        n = len(sub)
+        reussites = int(sub[cible].sum())
+        ligne = {
+            "seuil_bas": round(float(bande.left), 5),
+            "n_courses": n,
+            "reussite": round(reussites / n, 4),
+        }
+        # Le favori du public sur les mêmes courses : c'est la seule
+        # comparaison qui dise si écouter le modèle apporte quelque chose.
+        if "mkt_proba_implicite" in df.columns:
+            memes = df[df["course_id"].isin(sub["course_id"])]
+            memes = memes[memes["mkt_proba_implicite"].notna()]
+            if len(memes):
+                idx = memes.groupby("course_id")["mkt_proba_implicite"].idxmax()
+                ligne["reussite_marche"] = round(float(memes.loc[idx, cible].mean()), 4)
+        lignes.append(ligne)
+    return pd.DataFrame(lignes)
+
+
+def seuil_abstention(bandes: pd.DataFrame) -> float | None:
+    """
+    Plus petit écart 1ᵉʳ/2ᵉ à partir duquel le modèle fait au moins aussi
+    bien que le favori du public, ET s'y tient sur toutes les bandes
+    supérieures.
+
+    La seconde condition est celle qui compte : une bande isolée qui
+    dépasse le marché est probablement du bruit. Ce qu'on cherche, c'est
+    un régime — « au-delà de tel écart, ça tient ».
+
+    Renvoie None quand aucun seuil ne convient : le modèle doit alors se
+    taire partout, et c'est une réponse valable.
+    """
+    if bandes.empty or "reussite_marche" not in bandes.columns:
+        return None
+    b = bandes[bandes["n_courses"] >= MIN_COURSES_BANDE].sort_values("seuil_bas")
+    if b.empty:
+        return None
+    for i in range(len(b)):
+        reste = b.iloc[i:]
+        if (reste["reussite"] >= reste["reussite_marche"]).all():
+            return float(reste.iloc[0]["seuil_bas"])
+    return None
+
+
+def afficher_bandes(bandes: pd.DataFrame, seuil: float | None) -> str:
+    if bandes.empty:
+        return "── Abstention " + "─" * 45 + "\n  pas assez de courses pour trancher"
+    L = ["── Abstention " + "─" * 45,
+         f"  {'écart ≥':>9} {'courses':>8} {'modèle':>9} {'marché':>9}"]
+    for r in bandes.itertuples():
+        marche = getattr(r, "reussite_marche", None)
+        L.append(f"  {r.seuil_bas:>9.3f} {r.n_courses:>8} {r.reussite:>9.1%} "
+                 f"{('—' if marche is None or pd.isna(marche) else f'{marche:.1%}'):>9}")
+    if seuil is None:
+        L.append("  → aucun seuil ne tient : le modèle n'égale le marché sur")
+        L.append("    aucun régime de confiance. Rien n'est filtré — on ne")
+        L.append("    masque pas ce qu'on n'a pas su départager — mais aucune")
+        L.append("    course ne doit être tenue pour fiable pour autant.")
+    else:
+        n = int(bandes.loc[bandes["seuil_bas"] >= seuil, "n_courses"].sum())
+        total = int(bandes["n_courses"].sum())
+        L.append(f"  → seuil retenu : écart ≥ {seuil:.3f}, soit {n} courses "
+                 f"sur {total} ({n / total:.0%})")
+        L.append("    En dessous, le modèle n'apporte rien face au public :")
+        L.append("    mieux vaut ne rien annoncer que d'annoncer au hasard.")
+    return "\n".join(L)
+
+
+# ---------------------------------------------------------------------
 # 5. Bilan de PRODUCTION
 # ---------------------------------------------------------------------
 #

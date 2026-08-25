@@ -245,6 +245,7 @@ def construire_charge(conn, jour: date | None = None) -> dict:
             "partants": c["partants"],
             "confiance": round(c["confiance"], 3),
             "arrivee_connue": c["arrivee_connue"],
+            "publiable": c.get("publiable", True),
             "selection": selection,
         }
 

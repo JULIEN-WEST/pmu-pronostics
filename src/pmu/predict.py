@@ -57,7 +57,23 @@ CREATE INDEX IF NOT EXISTS idx_pronostic_course ON pronostic (course_id, rang);
 -- Ajoutée après coup, d'où l'ALTER : les bases déjà en service ne
 -- doivent pas exiger de réinitialisation pour recevoir cette colonne.
 ALTER TABLE pronostic ADD COLUMN IF NOT EXISTS details jsonb;
+-- Abstention : faux quand la course est en dessous du seuil de
+-- confiance mesuré. Le pronostic est calculé quand même — il faut
+-- pouvoir mesurer ce qu'on n'a pas publié — mais il est signalé comme
+-- non exploitable.
+ALTER TABLE pronostic ADD COLUMN IF NOT EXISTS publiable boolean NOT NULL DEFAULT true;
 """
+
+
+def lire_seuil_abstention(nom: str) -> float | None:
+    """Seuil mesuré au dernier entraînement, None si aucun ne tenait."""
+    chemin = DOSSIER_MODELES / nom / "abstention.json"
+    if not chemin.exists():
+        return None
+    try:
+        return json.loads(chemin.read_text(encoding="utf-8")).get("seuil")
+    except (ValueError, OSError):
+        return None
 
 
 # ---------------------------------------------------------------------
@@ -87,14 +103,28 @@ def entrainer(conn, *, avec_marche: bool = False, jusqua: date | None = None,
     test = df[m_test].copy()
     pred = modele.predire(test)
     test["proba"] = pred["proba"].reindex(test.index)
+    test["ecart_top2"] = pred["ecart_top2"].reindex(test.index)
     rapport = ev.rapport(test)
     if par_discipline:
         rapport["arbitrage"] = modele.arbitrage
 
+    # Seuil d'abstention, mesuré sur la fenêtre de test — la seule que
+    # ni l'entraînement ni la calibration n'ont vue.
+    bandes = ev.bandes_confiance(test)
+    seuil = ev.seuil_abstention(bandes)
+    rapport["seuil_abstention"] = seuil
+    (DOSSIER_MODELES / nom).mkdir(parents=True, exist_ok=True)
+    (DOSSIER_MODELES / nom / "abstention.json").write_text(
+        json.dumps({"seuil": seuil,
+                    "bandes": bandes.to_dict("records") if len(bandes) else []},
+                   indent=2, ensure_ascii=False),
+        encoding="utf-8")
+
     texte = ev.afficher(rapport)
+    texte += "\n\n" + ev.afficher_bandes(bandes, seuil)
     if par_discipline:
         texte += ("\n\n── Arbitrage par famille " + "─" * 34 + "\n"
-                  + resumer_arbitrage(modele.arbitrage))
+                  + resumer_arbitrage(modele.arbitrage, getattr(modele, "arbitrage_global", None)))
     log.info("modèle %s entraîné\n%s", nom, texte)
 
     (DOSSIER_MODELES / nom).mkdir(parents=True, exist_ok=True)
@@ -143,6 +173,9 @@ def pronostiquer(conn, jour: date | None = None, *, modeles=("sans_marche",)) ->
         pred["modele"] = nom
         pred["cote"] = du_jour["mkt_cote"].reindex(pred.index)
         pred["valeur"] = pred["proba"] * pred["cote"] - 1.0
+        seuil = lire_seuil_abstention(nom)
+        pred["publiable"] = (True if seuil is None
+                             else pred["ecart_top2"] >= seuil)
 
         # Justification. Elle ne doit JAMAIS faire échouer un pronostic :
         # mieux vaut une sélection sans explication qu'une journée perdue.
@@ -167,18 +200,20 @@ def pronostiquer(conn, jour: date | None = None, *, modeles=("sans_marche",)) ->
     lignes = [
         (int(r.course_id), int(r.num_pmu), float(r.proba), int(r.rang),
          float(r.ecart_top2), None if pd.isna(r.valeur) else float(r.valeur),
-         None if pd.isna(r.cote) else float(r.cote), r.modele, r.details)
+         None if pd.isna(r.cote) else float(r.cote), r.modele, r.details,
+         bool(r.publiable))
         for r in tout.itertuples()
     ]
     conn.cursor().executemany(
         """
         INSERT INTO pronostic (course_id, num_pmu, proba, rang, ecart_top2,
-                               valeur, cote, modele, details)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb)
+                               valeur, cote, modele, details, publiable)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s)
         ON CONFLICT (course_id, num_pmu, modele) DO UPDATE SET
             proba = EXCLUDED.proba, rang = EXCLUDED.rang,
             ecart_top2 = EXCLUDED.ecart_top2, valeur = EXCLUDED.valeur,
-            cote = EXCLUDED.cote, details = EXCLUDED.details, calcule_le = now()
+            cote = EXCLUDED.cote, details = EXCLUDED.details,
+            publiable = EXCLUDED.publiable, calcule_le = now()
         """,
         lignes,
     )
@@ -203,7 +238,7 @@ def lire_pronostics(conn, jour: date, modele: str = "sans_marche") -> list[dict]
             c.nombre_partants, c.etat_terrain, c.ordre_arrivee,
             h.libelle_long AS hippodrome, r.hippodrome_code,
             pr.num_pmu, pr.proba, pr.rang, pr.ecart_top2, pr.valeur, pr.cote,
-            pr.calcule_le, pr.details,
+            pr.calcule_le, pr.details, pr.publiable,
             ch.nom AS cheval, ch.nom_pere, ch.nom_pere_mere,
             pd.nom_affiche AS driver, pe.nom_affiche AS entraineur, p.musique,
             p.age, p.sexe, p.place_corde, p.deferre,
@@ -242,6 +277,8 @@ def lire_pronostics(conn, jour: date, modele: str = "sans_marche") -> list[dict]
                 "depart": r["heure_depart"].isoformat() if r["heure_depart"] else None,
                 "arrivee_connue": r["ordre_arrivee"] is not None,
                 "confiance": float(r["ecart_top2"] or 0),
+                # Faux = le modèle n'a rien vu de net dans cette course.
+                "publiable": bool(r["publiable"]),
                 "calcule_le": r["calcule_le"].isoformat() if r["calcule_le"] else None,
                 "selection": [],
             }

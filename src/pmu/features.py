@@ -44,7 +44,22 @@ from .normalize import parse_marge, parse_musique
 # de tous. On entraîne donc DEUX modèles (cf. train.py) :
 #   - sans marché  → cherche un écart exploitable
 #   - avec marché  → borne haute de ce qui est prévisible
-COLONNES_MARCHE = ["mkt_cote", "mkt_proba_implicite", "mkt_rang_cote", "mkt_derive"]
+COLONNES_MARCHE = [
+    "mkt_cote", "mkt_proba_implicite", "mkt_rang_cote", "mkt_derive",
+    # Trajectoire de la cote. Ce sont des variables de MARCHÉ : elles
+    # rendent le modèle `avec_marche` nettement meilleur, mais elles ne
+    # peuvent pas créer un écart FACE au marché, puisqu'elles sont le
+    # marché. Leur usage réel est ailleurs : savoir si l'argent va vers
+    # notre sélection ou s'en détourne, donc quand se taire.
+    "mkt_derive_tardive", "mkt_amplitude", "mkt_volatilite",
+    "mkt_n_releves", "mkt_rang_derive",
+]
+
+# Cibles ordinales. Une course de 14 partants n'apprend qu'un seul bit
+# au modèle si la cible est « qui gagne ». Les seuils intermédiaires
+# exploitent l'ORDRE D'ARRIVÉE, donc bien plus d'information par course,
+# sur exactement les mêmes données.
+SEUILS_ORDINAUX = [("y_gagnant", 1), ("y_top2", 2), ("y_top3", 3), ("y_top5", 5)]
 
 # Regroupement des disciplines en FAMILLES.
 #
@@ -248,6 +263,11 @@ def construire(df: pd.DataFrame, *, avec_marche: bool = True) -> pd.DataFrame:
     n_part = pd.to_numeric(df["nombre_partants"], errors="coerce")
     seuil_place = np.where(n_part >= 8, 3, 2)
     df["y_place"] = ((place > 0) & (place <= seuil_place)).astype(float)
+    # Décomposition ordinale : « dans les k premiers » pour plusieurs k.
+    # Chaque seuil est une cible binaire, et l'ensemble reconstitue
+    # l'ordre d'arrivée sans avoir à écrire un modèle de rang complet.
+    for nom, k in SEUILS_ORDINAUX:
+        df[nom] = ((place > 0) & (place <= k)).astype(float)
     # ── Deux notions distinctes, et les confondre coûte cher ──────────
     #
     # `est_exploitable` : cette ligne COMPTE dans l'historique. Elle a un
@@ -278,6 +298,26 @@ def construire(df: pd.DataFrame, *, avec_marche: bool = True) -> pd.DataFrame:
     df["c_terrain"] = _classe_terrain(df.get("etat_terrain", pd.Series(index=df.index, dtype=object)))
     df["c_nb_partants"] = n_part
     df["c_allocation"] = pd.to_numeric(df.get("montant_prix"), errors="coerce")
+    # --- Conditions d'engagement : collectées depuis le début, lues
+    #     seulement maintenant. Le pénétromètre est le seul chiffre du
+    #     lot : « bon » est un adjectif, 3,8 est une mesure.
+    if "penetrometre" in df.columns:
+        df["c_penetrometre"] = pd.to_numeric(df["penetrometre"], errors="coerce")
+    for brut, nom in [("categorie_particularite", "c_categorie"),
+                      ("categorie_statut", "c_statut_course"),
+                      ("condition_age", "c_condition_age"),
+                      ("condition_sexe", "c_condition_sexe"),
+                      ("corde", "c_sens_corde")]:
+        if brut in df.columns:
+            df[nom] = df[brut].astype("category")
+    if "nombre_declares_partants" in df.columns:
+        declares = pd.to_numeric(df["nombre_declares_partants"], errors="coerce")
+        df["c_declares"] = declares
+        # Beaucoup de non-partants change la physionomie d'une course :
+        # moins de monde, moins de trafic, et un lot qui n'est plus celui
+        # que le public avait jugé à l'ouverture.
+        df["c_taux_non_partants"] = 1.0 - (n_part / declares.replace(0, np.nan))
+
     df["c_corde"] = pd.to_numeric(df["place_corde"], errors="coerce")
     # La corde ne veut rien dire dans l'absolu : 3 sur 8 ≠ 3 sur 18.
     df["c_corde_rel"] = df["c_corde"] / df["c_nb_partants"]
@@ -453,6 +493,30 @@ def construire(df: pd.DataFrame, *, avec_marche: bool = True) -> pd.DataFrame:
             df["mkt_derive"] = np.log(cote / ouv.replace(0, np.nan))
         else:
             df["mkt_derive"] = np.nan
+
+        # --- Trajectoire complète de la cote ---
+        # ⚠️ `pd.to_numeric(df.get("absente"))` rend un SCALAIRE nan, pas
+        # une série : la ligne suivante casse alors sur `.replace`. Une
+        # base d'avant cette version n'a aucune de ces colonnes.
+        def _serie(nom):
+            if nom not in df.columns:
+                return pd.Series(np.nan, index=df.index, dtype="float64")
+            return pd.to_numeric(df[nom], errors="coerce")
+
+        t15 = _serie("cote_t15")
+        # Le mouvement du DERNIER quart d'heure, isolé du reste. C'est
+        # là que se place l'argent tardif, réputé le mieux informé.
+        df["mkt_derive_tardive"] = np.log(cote / t15.replace(0, np.nan))
+        cmin = _serie("cote_min")
+        cmax = _serie("cote_max")
+        df["mkt_amplitude"] = np.log(cmax / cmin.replace(0, np.nan))
+        df["mkt_volatilite"] = _serie("cote_ecart_type")
+        df["mkt_n_releves"] = _serie("cote_n")
+        # La dérive n'a de sens que RELATIVE : dans une course, les cotes
+        # somment à une constante, donc si tout le monde baisse, personne
+        # ne baisse vraiment.
+        df["mkt_rang_derive"] = df.groupby("course_id", sort=False)[
+            "mkt_derive_tardive"].rank(pct=True, ascending=True)
     else:
         for col in COLONNES_MARCHE:
             df[col] = np.nan
@@ -469,10 +533,13 @@ def colonnes_features(df: pd.DataFrame, *, avec_marche: bool = False) -> list[st
         cols += [c for c in COLONNES_MARCHE if c in df.columns]
     # Anti-erreur : aucune colonne de résultat ne doit passer.
     interdites = {
-        "ordre_arrivee", "y_gagnant", "y_place", "statut_arrivee", "temps_officiel_ms",
+        "ordre_arrivee", "y_place", "statut_arrivee", "temps_officiel_ms",
         "reduction_km_ms", "commentaire_apres_course", "distance_cheval_precedent",
         "est_exploitable", "est_cible", "source",
     }
+    # Toutes les cibles ordinales sont des résultats : y_top3 dans les
+    # features reviendrait à donner l'arrivée au modèle.
+    interdites |= {nom for nom, _ in SEUILS_ORDINAUX}
     fuites = interdites.intersection(cols)
     if fuites:
         raise ValueError(f"colonnes de résultat dans les features : {sorted(fuites)}")

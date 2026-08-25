@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -187,6 +188,145 @@ class ModelePmu:
 
 
 # =====================================================================
+# Modèle ordinal — exploiter l'ordre d'arrivée, pas seulement le gagnant
+# =====================================================================
+#
+# LE CONSTAT
+#
+# Une course de quatorze partants n'apprend qu'une seule chose au
+# modèle binaire : qui a gagné. Les treize autres places, qui disent
+# pourtant quelque chose du niveau de chacun, sont jetées. À volume de
+# données constant, c'est le gaspillage le plus coûteux du projet.
+#
+# LA MÉTHODE
+#
+# Décomposition ordinale : au lieu d'un modèle « gagnant / pas
+# gagnant », on en entraîne un par seuil — dans les 1, les 2, les 3,
+# les 5 premiers. Chacun voit une cible différente, donc une découpe
+# différente de l'ordre d'arrivée. Un empileur apprend ensuite à les
+# combiner en une probabilité de victoire.
+#
+# POURQUOI PAS UN MODÈLE DE RANG (LambdaRank)
+#
+# Il faudrait LightGBM, absent de l'image par défaut, et il rend un
+# SCORE, pas une probabilité. Or la probabilité calibrée est le
+# livrable : « 20 % » doit vouloir dire une fois sur cinq. La
+# décomposition garde cette propriété et tourne partout.
+#
+# L'HYGIÈNE DU DÉCOUPAGE, qui est le point délicat
+#
+#   train    → les quatre modèles de seuil
+#   calib A  → l'empileur (il voit les sorties des modèles de seuil,
+#              jamais vues à l'entraînement)
+#   calib B  → la calibration isotonique ET l'arbitrage
+#   test     → jamais touché
+#
+# Sans cette coupure de `calib` en deux, l'empileur et le calibrateur
+# apprendraient sur les mêmes lignes, et la calibration annoncerait une
+# justesse qu'elle n'a pas.
+
+
+@dataclass
+class ModeleOrdinal:
+    """Un modèle par seuil d'arrivée, plus un empileur qui les combine."""
+    cible: str = "y_gagnant"
+    avec_marche: bool = False
+    colonnes: list = field(default_factory=list)
+    seuils: list = field(default_factory=list)
+    modeles: dict = field(default_factory=dict)
+    empileur: object = None
+    calibrateur: IsotonicRegression | None = None
+
+    _matrice = ModelePmu._matrice
+    _nouveau_modele = ModelePmu._nouveau_modele
+    _normaliser_par_course = staticmethod(ModelePmu._normaliser_par_course)
+
+    def _scores(self, df: pd.DataFrame) -> np.ndarray:
+        """Une colonne par seuil, normalisée à l'intérieur de la course."""
+        X = self._matrice(df)
+        cols = []
+        for nom in self.seuils:
+            brut = self.modeles[nom].predict_proba(X)[:, 1]
+            cols.append(self._normaliser_par_course(brut, df["course_id"]))
+        return np.column_stack(cols)
+
+    def entrainer(self, df: pd.DataFrame, decoupage: Decoupage) -> "ModeleOrdinal":
+        from sklearn.linear_model import LogisticRegression
+
+        df = df[df["est_cible"]].copy()
+        self.colonnes = ft.colonnes_features(df, avec_marche=self.avec_marche)
+        self.seuils = [n for n, _ in ft.SEUILS_ORDINAUX if n in df.columns
+                       and df[n].nunique() > 1]
+        if self.cible not in self.seuils:
+            self.seuils = [self.cible] + self.seuils
+
+        m_train, m_calib, _ = decoupage.masques(df["heure_depart"])
+        if m_train.sum() == 0 or m_calib.sum() == 0:
+            raise ValueError("fenêtres d'entraînement ou de calibration vides")
+
+        X = self._matrice(df)
+        for nom in self.seuils:
+            modele = self._nouveau_modele()
+            modele.fit(X[m_train], df.loc[m_train, nom])
+            self.modeles[nom] = modele
+        log.info("ordinal : %d seuils sur %d partants", len(self.seuils), m_train.sum())
+
+        # Coupure de la fenêtre de calibration en deux moitiés
+        # chronologiques — A pour l'empileur, B pour l'isotonie.
+        calib = df[m_calib]
+        milieu = calib["heure_depart"].quantile(0.5)
+        a = calib[calib["heure_depart"] <= milieu]
+        b = calib[calib["heure_depart"] > milieu]
+        if len(a) < 50 or len(b) < 50 or a[self.cible].nunique() < 2:
+            raise ValueError("fenêtre de calibration trop courte pour l'empilement")
+
+        self.empileur = LogisticRegression(max_iter=1000)
+        self.empileur.fit(self._scores(a), a[self.cible])
+
+        brut = self.empileur.predict_proba(self._scores(b))[:, 1]
+        norm = self._normaliser_par_course(brut, b["course_id"])
+        self.calibrateur = IsotonicRegression(out_of_bounds="clip", y_min=0.0, y_max=1.0)
+        self.calibrateur.fit(norm, b[self.cible])
+        return self
+
+    def predire(self, df: pd.DataFrame) -> pd.DataFrame:
+        brut = self.empileur.predict_proba(self._scores(df))[:, 1]
+        norm = self._normaliser_par_course(brut, df["course_id"])
+        proba = self.calibrateur.predict(norm) if self.calibrateur is not None else norm
+        out = pd.DataFrame({
+            "course_id": df["course_id"].to_numpy(),
+            "num_pmu": df["num_pmu"].to_numpy(),
+            "proba_brute": norm, "proba": proba,
+        }, index=df.index)
+        out["proba"] = self._normaliser_par_course(out["proba"].to_numpy(), out["course_id"])
+        out["rang"] = out.groupby("course_id")["proba"].rank(ascending=False, method="first")
+        top2 = out.groupby("course_id")["proba"].transform(
+            lambda s: s.nlargest(2).min() if len(s) > 1 else 0.0)
+        top1 = out.groupby("course_id")["proba"].transform("max")
+        out["ecart_top2"] = top1 - top2
+        return out.sort_values(["course_id", "proba"], ascending=[True, False])
+
+    def sauver(self, dossier: str | Path) -> None:
+        import joblib
+        dossier = Path(dossier)
+        dossier.mkdir(parents=True, exist_ok=True)
+        joblib.dump({"modeles": self.modeles, "empileur": self.empileur,
+                     "calibrateur": self.calibrateur, "colonnes": self.colonnes,
+                     "seuils": self.seuils, "cible": self.cible,
+                     "avec_marche": self.avec_marche},
+                    dossier / "ordinal.joblib")
+
+    @classmethod
+    def charger(cls, dossier: str | Path) -> "ModeleOrdinal":
+        import joblib
+        d = joblib.load(Path(dossier) / "ordinal.joblib")
+        o = cls(cible=d["cible"], avec_marche=d["avec_marche"],
+                colonnes=d["colonnes"], seuils=d["seuils"])
+        o.modeles, o.empileur, o.calibrateur = d["modeles"], d["empileur"], d["calibrateur"]
+        return o
+
+
+# =====================================================================
 # Modèles par famille de discipline
 # =====================================================================
 #
@@ -219,6 +359,9 @@ class ModelePmu:
 # Volumes en dessous desquels on ne tente même pas la spécialisation.
 MIN_TRAIN_FAMILLE = 3000
 MIN_CALIB_FAMILLE = 800
+# Décomposition ordinale active par défaut ; `PMU_ORDINAL=0` revient à la
+# cible binaire seule, pour comparer les deux sur ta propre base.
+ORDINAL_ACTIF = os.environ.get("PMU_ORDINAL", "1").strip() not in ("0", "non", "false")
 # Marge exigée pour préférer le spécialisé. Un écart d'AUC de 0,002 sur
 # quelques milliers de lignes est du bruit ; on ne complique pas la pile
 # pour du bruit.
@@ -237,6 +380,7 @@ class ModeleParDiscipline:
     global_: ModelePmu | None = None
     par_famille: dict = field(default_factory=dict)
     arbitrage: dict = field(default_factory=dict)
+    arbitrage_global: dict = field(default_factory=dict)
 
     # -- interne ------------------------------------------------------
 
@@ -246,7 +390,7 @@ class ModeleParDiscipline:
             return df["famille"]
         return ft.famille(df["discipline"])
 
-    def _auc(self, modele: ModelePmu, sous_ensemble: pd.DataFrame):
+    def _auc(self, modele, sous_ensemble: pd.DataFrame):
         """AUC du modèle sur un sous-ensemble, ou None si non calculable."""
         from sklearn.metrics import roc_auc_score
         y = sous_ensemble[self.cible]
@@ -255,15 +399,54 @@ class ModeleParDiscipline:
         p = modele.predire(sous_ensemble)["proba"].reindex(sous_ensemble.index)
         return float(roc_auc_score(y, p))
 
+    def _binaire_ou_ordinal(self, sub: pd.DataFrame, decoupage: Decoupage,
+                            fiche: dict):
+        """
+        Entraîne les deux approches et garde la meilleure — mesurée, pas
+        supposée. La comparaison porte sur la SECONDE moitié de la
+        fenêtre de calibration : l'empileur du modèle ordinal n'a vu que
+        la première, et les modèles de base des deux n'ont vu que
+        l'entraînement. Le test reste intact.
+        """
+        binaire = ModelePmu(cible=self.cible,
+                            avec_marche=self.avec_marche).entrainer(sub, decoupage)
+        if not ORDINAL_ACTIF:
+            fiche["cible"] = "binaire"
+            return binaire
+
+        _, m_calib, _ = decoupage.masques(sub["heure_depart"])
+        calib = sub[m_calib]
+        b = calib[calib["heure_depart"] > calib["heure_depart"].quantile(0.5)]
+        try:
+            ordinal = ModeleOrdinal(cible=self.cible,
+                                    avec_marche=self.avec_marche).entrainer(sub, decoupage)
+        except (ValueError, KeyError) as exc:
+            fiche["cible"] = "binaire"
+            fiche["motif_cible"] = f"ordinal impossible : {exc}"
+            return binaire
+
+        a_ord, a_bin = self._auc(ordinal, b), self._auc(binaire, b)
+        fiche["auc_ordinal"] = None if a_ord is None else round(a_ord, 4)
+        fiche["auc_binaire"] = None if a_bin is None else round(a_bin, 4)
+        if a_ord is not None and a_bin is not None and a_ord > a_bin + MARGE_AUC:
+            fiche["cible"] = "ordinale"
+            fiche["gain_cible"] = round(a_ord - a_bin, 4)
+            return ordinal
+        fiche["cible"] = "binaire"
+        if a_ord is not None and a_bin is not None:
+            fiche["gain_cible"] = round(a_ord - a_bin, 4)
+        return binaire
+
     # -- API ----------------------------------------------------------
 
     def entrainer(self, df: pd.DataFrame, decoupage: Decoupage) -> "ModeleParDiscipline":
         df = df[df["est_cible"]].copy()
         df["famille"] = self._familles(df)
 
-        self.global_ = ModelePmu(
-            cible=self.cible, avec_marche=self.avec_marche
-        ).entrainer(df, decoupage)
+        # Fiche du modèle global tenue À PART : `arbitrage` ne contient
+        # que des familles, et tout ce qui le lit compte dessus.
+        self.arbitrage_global = {"n_total": int(len(df))}
+        self.global_ = self._binaire_ou_ordinal(df, decoupage, self.arbitrage_global)
 
         self.par_famille, self.arbitrage = {}, {}
         for fam, sub in df.groupby("famille", sort=True):
@@ -279,9 +462,7 @@ class ModeleParDiscipline:
                 continue
 
             try:
-                spec = ModelePmu(
-                    cible=self.cible, avec_marche=self.avec_marche
-                ).entrainer(sub, decoupage)
+                spec = self._binaire_ou_ordinal(sub, decoupage, fiche)
             except ValueError as exc:          # fenêtre vide malgré le comptage
                 fiche["decision"] = "global"
                 fiche["motif"] = f"entraînement impossible : {exc}"
@@ -306,7 +487,8 @@ class ModeleParDiscipline:
                 fiche["motif"] = f"gain insuffisant (marge exigée {MARGE_AUC})"
             self.arbitrage[str(fam)] = fiche
 
-        log.info("arbitrage par famille\n%s", resumer_arbitrage(self.arbitrage))
+        log.info("arbitrage par famille\n%s",
+                 resumer_arbitrage(self.arbitrage, self.arbitrage_global))
         return self
 
     def predire(self, df: pd.DataFrame) -> pd.DataFrame:
@@ -330,7 +512,8 @@ class ModeleParDiscipline:
             json.dumps({"type": "par_discipline", "cible": self.cible,
                         "avec_marche": self.avec_marche,
                         "familles": sorted(self.par_famille),
-                        "arbitrage": self.arbitrage},
+                        "arbitrage": self.arbitrage,
+                        "arbitrage_global": self.arbitrage_global},
                        indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
@@ -340,21 +523,44 @@ class ModeleParDiscipline:
         dossier = Path(dossier)
         meta = json.loads((dossier / "meta.json").read_text(encoding="utf-8"))
         obj = cls(cible=meta["cible"], avec_marche=meta["avec_marche"],
-                  arbitrage=meta.get("arbitrage", {}))
-        obj.global_ = ModelePmu.charger(dossier / "global")
+                  arbitrage=meta.get("arbitrage", {}),
+                  arbitrage_global=meta.get("arbitrage_global", {}))
+        obj.global_ = _charger_un(dossier / "global")
         obj.par_famille = {
-            fam: ModelePmu.charger(dossier / "familles" / fam)
+            fam: _charger_un(dossier / "familles" / fam)
             for fam in meta.get("familles", [])
         }
         return obj
 
 
-def resumer_arbitrage(arb: dict) -> str:
+def _charger_un(dossier: Path):
+    """
+    Recharge un sous-modèle sans savoir lequel des deux il est.
+    L'arbitrage peut avoir retenu une cible ordinale pour l'attelé et
+    binaire pour le plat : le format n'est donc pas uniforme d'un
+    dossier à l'autre.
+    """
+    dossier = Path(dossier)
+    if (dossier / "ordinal.joblib").exists():
+        return ModeleOrdinal.charger(dossier)
+    return ModelePmu.charger(dossier)
+
+
+def resumer_arbitrage(arb: dict, global_: dict | None = None) -> str:
     """Tableau lisible : qui a été spécialisé, qui ne l'a pas été, pourquoi."""
-    if not arb:
+    if not arb and not global_:
         return "  (aucune famille)"
-    L = [f"  {'famille':<10} {'partants':>9} {'AUC spéc.':>10} {'AUC glob.':>10} "
-         f"{'gain':>8}  décision"]
+    L = []
+    g = global_
+    if g:
+        L.append(f"  cible retenue au global : {g.get('cible', '?')}"
+                 + (f" (AUC {g['auc_ordinal']:.4f} ordinale contre "
+                    f"{g['auc_binaire']:.4f} binaire)"
+                    if g.get("auc_ordinal") is not None
+                    and g.get("auc_binaire") is not None else ""))
+        L.append("")
+    L.append(f"  {'famille':<10} {'partants':>9} {'AUC spéc.':>10} {'AUC glob.':>10} "
+             f"{'gain':>8}  décision")
     for fam, f in sorted(arb.items()):
         spec = f.get("auc_specialise")
         glob = f.get("auc_global")
@@ -365,6 +571,7 @@ def resumer_arbitrage(arb: dict) -> str:
             f"{('—' if glob is None else f'{glob:.4f}'):>10} "
             f"{('—' if gain is None else f'{gain:+.4f}'):>8}  "
             f"{'SPÉCIALISÉ' if f['decision'] == 'specialise' else 'global'}"
+            + (f" · cible {f['cible']}" if f.get("cible") else "")
             + (f" ({f['motif']})" if f.get("motif") else "")
         )
     L.append("  → « global » n'est pas un échec : c'est la mesure qui dit que")
@@ -388,14 +595,14 @@ def charger_modele(dossier: str | Path):
         except (ValueError, OSError) as exc:
             log.warning("meta.json illisible dans %s (%s) — repli sur le modèle unique",
                         dossier, exc)
-    return ModelePmu.charger(dossier)
+    return _charger_un(dossier)
 
 
 def modele_present(dossier: str | Path) -> bool:
     """Vrai si un modèle rechargeable existe à cet endroit."""
     dossier = Path(dossier)
-    return ((dossier / "modele.joblib").exists()
-            or (dossier / "global" / "modele.joblib").exists())
+    return any((dossier / n).exists() for n in ("modele.joblib", "ordinal.joblib")) or \
+        any((dossier / "global" / n).exists() for n in ("modele.joblib", "ordinal.joblib"))
 
 
 def importances(modele: ModelePmu, df: pd.DataFrame, n: int = 30) -> pd.DataFrame:
