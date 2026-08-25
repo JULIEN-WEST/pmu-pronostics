@@ -437,3 +437,61 @@ def link_genealogie(conn) -> int:
         )
         total += res.rowcount or 0
     return total
+
+SQL_PROPAGER_ARRIVEES = """
+WITH rangs AS (
+    SELECT c.course_id,
+           elem.ord::smallint AS rang,
+           (num.valeur #>> '{}')::smallint AS num_pmu
+      FROM course c
+      CROSS JOIN LATERAL jsonb_array_elements(c.ordre_arrivee)
+           WITH ORDINALITY AS elem(groupe, ord)
+      -- Le PMU écrit tantôt [[3],[7],[1,9]] — le 3e rang est un ex æquo —
+      -- tantôt [3,7,1]. On normalise en enveloppant les scalaires.
+      CROSS JOIN LATERAL jsonb_array_elements(
+           CASE WHEN jsonb_typeof(elem.groupe) = 'array'
+                THEN elem.groupe ELSE jsonb_build_array(elem.groupe) END
+      ) AS num(valeur)
+     WHERE c.ordre_arrivee IS NOT NULL
+       AND (%(jour)s::date IS NULL OR c.date_reunion = %(jour)s::date)
+       AND jsonb_typeof(c.ordre_arrivee) = 'array'
+       AND (num.valeur #>> '{}') ~ '^[0-9]+$'
+)
+UPDATE partant p
+   SET ordre_arrivee = r.rang
+  FROM rangs r
+ WHERE p.course_id = r.course_id
+   AND p.num_pmu = r.num_pmu
+   AND p.ordre_arrivee IS NULL
+"""
+
+
+def propager_arrivees(conn, jour=None) -> int:
+    """
+    Recopie l'arrivée de la COURSE vers ses PARTANTS, en SQL pur.
+
+    POURQUOI CETTE FONCTION EXISTE
+
+    L'arrivée arrive en base à deux niveaux et à deux moments : au
+    niveau de la course dès que le programme est rafraîchi, au niveau
+    des partants seulement quand on re-télécharge les participants —
+    ce que le planificateur ne faisait qu'à 23 h 30.
+
+    Entre les deux, la base contenait 29 courses arrivées dont AUCUN
+    partant n'était classé premier. Conséquence : le tableau de bord
+    affichait tous les favoris comme battus, et le bilan de production
+    ne pouvait juger aucune course. Le modèle n'y était pour rien.
+
+    La réparation ne demande aucun appel à l'API : l'information est
+    déjà là, dans `course.ordre_arrivee`. C'est une simple projection,
+    idempotente, qu'on peut lancer aussi souvent qu'on veut.
+
+    `ordre_arrivee IS NULL` dans le WHERE : on ne réécrit jamais une
+    place déjà connue, la source directe reste prioritaire.
+    """
+    cur = conn.execute(SQL_PROPAGER_ARRIVEES, {"jour": jour})
+    n = cur.rowcount or 0
+    if n:
+        log.info("arrivées propagées vers %d partant(s)", n)
+    return n
+

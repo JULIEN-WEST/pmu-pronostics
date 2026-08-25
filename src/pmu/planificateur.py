@@ -359,6 +359,18 @@ class Planificateur:
         if self.dernier_programme == jour and self.cotes(conn, jour) > 0:
             self.pronostics(conn, jour)
 
+        # Arrivées : un appel au programme du jour et une projection SQL.
+        # Assez léger pour tourner à chaque tour, et c'est ce qui manquait
+        # — sans lui, les places ne descendaient au niveau des partants
+        # qu'à 23 h 30 et le tableau de bord affichait tous les favoris
+        # comme battus pendant toute la journée.
+        if self.dernier_programme == jour and n.time() >= dtime(12, 0):
+            try:
+                collect.rafraichir_arrivees(conn, self.client, jour)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("rafraîchissement des arrivées : %s", exc)
+                conn.rollback()
+
         if self.derniere_arrivee != jour and n.time() >= dtime(23, 30):
             self.arrivees(conn, jour)
             self.derniere_arrivee = jour
@@ -504,6 +516,24 @@ def main() -> None:
 
     with db.connect() as conn:
         amorcer(conn, client)
+        # Réparation du passé, avant toute autre chose. Les arrivées
+        # n'ont longtemps été projetées vers les partants qu'à 23 h 30 ;
+        # les courses restées en plan sont ici remises d'aplomb en une
+        # requête, sans le moindre appel à l'API.
+        try:
+            repares = db.propager_arrivees(conn)
+            conn.commit()
+            if repares:
+                log.info(_cadre("ARRIVEES REPAREES", [
+                    f"{repares} partants ont recu leur place d'arrivee.",
+                    "",
+                    "Ces courses etaient arrivees sans qu'aucun partant",
+                    "ne soit classe : le tableau de bord affichait donc",
+                    "tous les favoris comme battus, a tort.",
+                ]))
+        except Exception as exc:  # noqa: BLE001
+            log.warning("propagation des arrivées impossible : %s", exc)
+            conn.rollback()
         reentrainer_a_la_demande(conn)
 
     Planificateur(client).boucler()

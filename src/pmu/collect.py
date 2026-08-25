@@ -295,3 +295,37 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+
+def rafraichir_arrivees(conn, client, jour) -> int:
+    """
+    Met à jour les arrivées du jour au moindre coût.
+
+    UN SEUL appel à l'API — le programme de la journée, qui porte
+    l'ordre d'arrivée de chaque course — puis une projection SQL vers
+    les partants. Aucun appel par course, donc c'est assez léger pour
+    tourner à chaque tour du planificateur.
+
+    C'est ce qui manquait : les arrivées ne descendaient au niveau des
+    partants qu'à 23 h 30, et entre-temps le tableau de bord affichait
+    tous les favoris comme battus.
+    """
+    try:
+        prog = client.programme(jour, use_cache=False)
+    except (PmuNotFound, PmuError) as exc:
+        log.warning("programme du %s indisponible : %s", jour, exc)
+        return 0
+
+    reunions = nz.dig(prog, "programme", "reunions", default=[]) or []
+    for raw_r in reunions:
+        r = nz.parse_reunion(raw_r)
+        for raw_course in raw_r.get("courses") or []:
+            c = nz.parse_course(raw_course, r["date_reunion"])
+            if c["num_reunion"] is None:
+                c["num_reunion"] = r["num_officiel"]
+            if c["num_ordre"] is None or not c["ordre_arrivee"]:
+                continue
+            db.upsert_course(conn, c)
+    n = db.propager_arrivees(conn, jour)
+    conn.commit()
+    return n
