@@ -24,6 +24,11 @@ from __future__ import annotations
 import html
 import json
 from datetime import date, datetime
+from zoneinfo import ZoneInfo
+
+# L'heure affichée est celle des courses, pas celle du serveur : un
+# conteneur en UTC afficherait deux heures de retard sans rien signaler.
+FUSEAU = ZoneInfo("Europe/Paris")
 
 # ---------------------------------------------------------------------
 
@@ -536,11 +541,37 @@ def page(courses: list[dict], *, jour: date, meta: dict | None = None,
         classe = "puce" if frais else "puce alerte"
         puces.append(f'<span class="{classe}">calculé il y a {age} h</span>')
 
-    corps = (f'<div class="rail">{rail}</div><div id="course"></div>'
-             if data else
-             '<div class="carte"><h2>Aucun pronostic pour cette date</h2>'
-             '<p class="note">Soit le programme est vide, soit la collecte '
-             'n\'a pas encore tourné. La page se remplira d\'elle-même.</p></div>')
+    # L'HEURE DE FABRICATION DE LA PAGE — et pas seulement celle des
+    # données. Cette page est le plus souvent consultée via une COPIE
+    # rapatriée dans le dossier `www` de Home Assistant, et cette copie
+    # peut dater de plusieurs heures sans que rien ne le montre : le
+    # « calculé il y a X h » est figé au moment du téléchargement et ne
+    # bouge plus. Deux soirées ont été perdues à débattre d'un affichage
+    # qui venait d'un fichier périmé. Cette puce-là compare
+    # immédiatement à l'horloge de celui qui regarde.
+    fabriquee = datetime.now(FUSEAU).strftime("%H:%M")
+    puces.append(f'<span class="puce" title="heure de génération de cette page">'
+                 f'page du {jour.strftime("%d/%m")} à {fabriquee}</span>')
+
+    if data:
+        corps = f'<div class="rail">{rail}</div><div id="course"></div>'
+    elif meta.get("amorcage"):
+        # Le vide EXPLIQUÉ. Pendant le rattrapage d'historique la page
+        # reste vide une à deux heures ; sans ce message elle passe pour
+        # une panne, et c'est exactement ce qui s'est produit.
+        n = meta.get("jours_collectes") or 0
+        corps = (
+            '<div class="carte">'
+            '<h2>Rattrapage de l\'historique en cours</h2>'
+            '<p class="note">La pile reconstruit sa base avant de pouvoir '
+            'pronostiquer. Compter une à deux heures.</p>'
+            f'<p class="note"><b>{n}</b> journée(s) de courses déjà '
+            'récupérée(s). Cette page se remplira d\'elle-même — rien à faire.</p>'
+            '</div>')
+    else:
+        corps = ('<div class="carte"><h2>Aucun pronostic pour cette date</h2>'
+                 '<p class="note">Soit le programme du jour est vide, soit la '
+                 'collecte n\'a pas encore tourné ce matin.</p></div>')
 
     return f"""<!doctype html>
 <html lang="fr"><head>

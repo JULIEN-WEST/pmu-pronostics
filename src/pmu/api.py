@@ -237,6 +237,17 @@ def vue_html(
                     age = (datetime.now(timezone.utc) - row["dernier"]).total_seconds() / 3600
                     meta["age_heures"] = round(age, 1)
                     meta["frais"] = age < 24
+            # Une page vide sans explication ressemble à une panne. Or
+            # elle est NORMALE pendant le rattrapage d'historique, qui
+            # dure une à deux heures. La carte Home Assistant savait le
+            # dire ; cette page-ci, non — et c'est elle qu'on regarde.
+            if not courses and _table_existe(conn, "collecte_journal"):
+                if not db.deja_collecte(conn, "amorcage", "termine"):
+                    meta["amorcage"] = True
+                    jours = conn.execute(
+                        "SELECT count(DISTINCT date_reunion) AS n FROM course"
+                    ).fetchone()
+                    meta["jours_collectes"] = int(jours["n"] or 0) if jours else 0
     except Exception as exc:  # noqa: BLE001 — la page ne doit jamais rendre une 500
         log.exception("vue indisponible")
         meta["erreur"] = str(exc)

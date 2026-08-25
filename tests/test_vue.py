@@ -232,3 +232,52 @@ def test_une_course_sous_le_seuil_est_mise_en_retrait():
     parlante = _course(publiable=True)
     assert 'class="muette"' in vue.page([muette], jour=date(2026, 8, 25))
     assert 'class=""' in vue.page([parlante], jour=date(2026, 8, 25))
+
+
+# ---------------------------------------------------------------------
+# L'état d'amorçage — un vide qui doit s'expliquer
+# ---------------------------------------------------------------------
+#
+# Pendant le rattrapage d'historique la page reste vide une à deux
+# heures. C'est NORMAL. Sans message, ça ressemble à une panne — et ça
+# a effectivement été pris pour une panne en production, la carte Home
+# Assistant sachant le dire alors que cette page, non.
+
+def test_le_rattrapage_est_annonce_et_chiffre():
+    p = vue.page([], jour=date(2026, 8, 25),
+                 meta={"amorcage": True, "jours_collectes": 47})
+    assert "Rattrapage de l'historique" in p
+    assert "47" in p, "la progression doit être visible, sinon l'attente est aveugle"
+    assert "rien à faire" in p
+    assert "Aucun pronostic" not in p
+
+
+def test_une_journee_vide_hors_amorcage_reste_distincte():
+    """
+    Programme vide et rattrapage en cours ne sont pas la même chose :
+    l'un demande d'attendre, l'autre de vérifier la collecte.
+    """
+    p = vue.page([], jour=date(2026, 8, 25), meta={})
+    assert "Aucun pronostic" in p
+    assert "Rattrapage" not in p
+
+
+def test_l_amorcage_sans_compteur_ne_plante_pas():
+    p = vue.page([], jour=date(2026, 8, 25), meta={"amorcage": True})
+    assert "Rattrapage de l'historique" in p
+    assert "None" not in p.split("<script>")[0]
+
+
+def test_l_heure_de_fabrication_de_la_page_est_affichee():
+    """
+    LE repère qui manquait. La page est consultée via une copie
+    rapatriée dans `www`, qui peut dater de plusieurs heures sans que
+    rien ne le montre : le « calculé il y a X h » est figé au moment du
+    téléchargement. Afficher l'heure de génération permet de comparer
+    d'un coup d'œil à sa propre horloge.
+    """
+    import re
+    p = vue.page([_course()], jour=date(2026, 8, 25), meta={})
+    assert re.search(r"page du 25/08 à \d\d:\d\d", p), (
+        "sans horodatage, une copie périmée est indétectable"
+    )
