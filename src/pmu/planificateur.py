@@ -445,6 +445,49 @@ def _preparer_base() -> bool:
     return False
 
 
+def reentrainer_a_la_demande(conn) -> bool:
+    """
+    Ré-entraînement forcé au démarrage, piloté par une variable.
+
+    Le ré-entraînement automatique est HEBDOMADAIRE : après une montée
+    de version, il faudrait donc attendre jusqu'à une semaine pour que
+    le nouveau modèle serve. Ouvrir une console dans le conteneur pour
+    le forcer marche, mais c'est un pas de côté quand tout le reste se
+    pilote depuis Portainer.
+
+    Fonctionne comme `PMU_RESET` : on met une valeur — la date du jour
+    fait un jeton commode — et le ré-entraînement a lieu UNE fois. Le
+    jeton est consigné, donc laisser la variable en place ne relance
+    rien à chaque redémarrage. Pour recommencer plus tard, changer sa
+    valeur.
+    """
+    jeton = os.environ.get("PMU_REENTRAINER", "").strip()
+    if not jeton:
+        return False
+    if db.deja_collecte(conn, "reentrainement", jeton):
+        log.info("ré-entraînement « %s » déjà effectué — rien à faire", jeton)
+        return False
+
+    log.info("%s", _cadre(f"RE-ENTRAINEMENT FORCE ({jeton})", [
+        "Declenche par la variable PMU_REENTRAINER.",
+        "Compter quelques minutes.",
+        "",
+        "Le rapport sera lisible sur http://<hote>:8100/rapport",
+    ]))
+    try:
+        entrainer(conn, avec_marche=False)
+        entrainer(conn, avec_marche=True)
+    except Exception as exc:  # noqa: BLE001
+        log.error("ré-entraînement forcé en échec : %s", exc)
+        conn.rollback()
+        # Pas de consignation : on retentera au prochain démarrage.
+        return False
+    db.journal(conn, "reentrainement", jeton, "OK")
+    conn.commit()
+    log.info("ré-entraînement « %s » terminé", jeton)
+    return True
+
+
 def main() -> None:
     logging.basicConfig(
         level=os.environ.get("PMU_LOG", "INFO"),
@@ -461,6 +504,7 @@ def main() -> None:
 
     with db.connect() as conn:
         amorcer(conn, client)
+        reentrainer_a_la_demande(conn)
 
     Planificateur(client).boucler()
 

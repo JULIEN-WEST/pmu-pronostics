@@ -8,7 +8,7 @@
 # d'après le nom de la stack. En déclarer un second provoque des
 # conteneurs orphelins à chaque redéploiement.
 #
-# ⚠️ Le numéro de version de l'image (pmu-pronostics:1.0) change à chaque
+# ⚠️ Le numéro de version de l'image (pmu-pronostics:1.1) change à chaque
 # livraison. C'est volontaire : Docker réutilise une image déjà présente
 # sans la reconstruire, donc sans un nouveau tag, un redéploiement
 # relancerait l'ANCIEN code sans rien signaler.
@@ -51,7 +51,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: pmu-pronostics:1.0
+    image: pmu-pronostics:1.1
     # Force la construction locale au lieu d'une tentative de
     # téléchargement. Sans ça, Portainer cherche « pmu-pronostics » dans
     # un registre public, ne le trouve évidemment pas, et échoue sur
@@ -81,6 +81,12 @@ services:
       # Décomposition ordinale (ordre d'arrivée) : 0 pour revenir à la
       # cible « gagnant » seule et comparer les deux sur ta base.
       PMU_ORDINAL: ${PMU_ORDINAL:-1}
+      # Ré-entraînement forcé au démarrage, UNE fois par valeur.
+      # L'automatique est hebdomadaire ; après une montée de version on
+      # ne veut pas attendre une semaine. Mettre la date du jour comme
+      # jeton, redéployer, et laisser la variable en place : elle ne
+      # relancera rien tant que sa valeur ne change pas.
+      PMU_REENTRAINER: ${PMU_REENTRAINER:-}
       MQTT_HOST: ${MQTT_HOST:-}
       MQTT_PORT: ${MQTT_PORT:-1883}
       MQTT_USER: ${MQTT_USER:-}
@@ -93,7 +99,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: pmu-pronostics:1.0
+    image: pmu-pronostics:1.1
     pull_policy: build
     restart: unless-stopped
     depends_on:

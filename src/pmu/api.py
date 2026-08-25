@@ -12,6 +12,8 @@ Endpoints :
     GET /pronostics                journée complète
     GET /pronostics/{code}         une course, ex. R1C3
     GET /vue                       page HTML visuelle, à mettre en iframe
+    GET /rapport                   rapport du dernier entraînement (texte)
+    GET /bilan?format=texte        ce que les pronostics publiés ont donné
     GET /ha/resume                 charge utile compacte pour Home Assistant
     GET /ha/prochaine              la course à venir, formatée pour l'affichage
 
@@ -25,9 +27,10 @@ from __future__ import annotations
 import logging
 import os
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
 from . import dataset, db, vue
 from .predict import lire_pronostics
@@ -124,11 +127,33 @@ def pronostic_course(
     raise HTTPException(404, f"{code} introuvable le {jour}")
 
 
+@app.get("/rapport", response_class=PlainTextResponse)
+def rapport(modele: str = Query(MODELE_DEFAUT)):
+    """
+    Le rapport du dernier entraînement, en texte lisible.
+
+    Il est écrit sur le volume partagé par le collecteur ; l'API se
+    contente de le relire. Ça évite d'avoir à ouvrir une console dans
+    le conteneur pour lire un fichier.
+    """
+    dossier = Path(os.environ.get("PMU_MODELES", "/data/modeles")) / modele
+    chemin = dossier / "rapport.txt"
+    if not chemin.exists():
+        raise HTTPException(
+            404,
+            f"aucun rapport pour le modèle {modele!r}. Le premier "
+            "entraînement n'a pas encore eu lieu, ou a échoué — regarder "
+            "les journaux du conteneur pmu-collecteur.")
+    entete = f"Rapport d'entraînement — modèle {modele}\n" + "=" * 62 + "\n\n"
+    return entete + chemin.read_text(encoding="utf-8")
+
+
 @app.get("/bilan")
 def bilan(
     modele: str = Query(MODELE_DEFAUT),
     depuis: str | None = Query(None, description="AAAA-MM-JJ"),
     jusqua: str | None = Query(None, description="AAAA-MM-JJ"),
+    format: str = Query("json", description="json | texte"),
 ):
     """
     Ce que les pronostics PUBLIÉS ont réellement donné, arrivées à
@@ -142,7 +167,13 @@ def bilan(
     with db.connect() as conn:
         if not _table_existe(conn, "pronostic"):
             raise HTTPException(503, "table pronostic absente")
-        return ev.bilan_production(conn, modele=modele, depuis=d, jusqua=j)
+        b = ev.bilan_production(conn, modele=modele, depuis=d, jusqua=j)
+    # `format=texte` rend le tableau lisible tel quel dans un navigateur.
+    # Le JSON brut est illisible pour un humain, et c'est pourtant un
+    # humain qui vient voir si son modèle marche.
+    if format.lower().startswith("t"):
+        return PlainTextResponse(ev.afficher_bilan(b))
+    return b
 
 
 # ---------------------------------------------------------------------

@@ -368,6 +368,30 @@ SELECT c.course_id, c.discipline, c.date_reunion,
 """
 
 
+def _json_sur(valeur):
+    """
+    Rend une valeur encodable en JSON.
+
+    NaN et ±inf sont des flottants parfaitement légitimes en Python et
+    en NumPy, mais ILLÉGAUX en JSON : `json.dumps` lève dessus. Le
+    calibrage rend NaN quand une tranche est vide, ce qui suffit à faire
+    répondre 500 à l'endpoint `/bilan` — c'est-à-dire précisément quand
+    on vient voir si quelque chose ne va pas.
+    """
+    if isinstance(valeur, dict):
+        return {k: _json_sur(v) for k, v in valeur.items()}
+    if isinstance(valeur, (list, tuple)):
+        return [_json_sur(v) for v in valeur]
+    if isinstance(valeur, (float, np.floating)):
+        v = float(valeur)
+        return None if (np.isnan(v) or np.isinf(v)) else v
+    if isinstance(valeur, (np.integer,)):
+        return int(valeur)
+    if isinstance(valeur, (np.bool_,)):
+        return bool(valeur)
+    return valeur
+
+
 def bilan_production(conn, *, modele: str, depuis, jusqua) -> dict:
     """
     Le tableau de bord honnête : ce que les pronostics publiés ont donné.
@@ -439,7 +463,19 @@ def bilan_production(conn, *, modele: str, depuis, jusqua) -> dict:
             "n_courses": k, "top1_taux": round(r / k, 4),
             "top1_ic95": [round(x, 4) for x in _intervalle_binomial(r, k)],
         }
-    return out
+    # Dernier passage : plus aucun NaN ni infini ne doit sortir d'ici,
+    # sinon la sérialisation JSON de l'API lève une 500.
+    return _json_sur(out)
+
+
+def _ou_tiret(x, gabarit: str = ".5f") -> str:
+    """Un nombre formaté, ou un tiret quand il n'y en a pas."""
+    if x is None:
+        return "—"
+    try:
+        return format(float(x), gabarit)
+    except (TypeError, ValueError):
+        return "—"
 
 
 def afficher_bilan(b: dict) -> str:
@@ -457,8 +493,11 @@ def afficher_bilan(b: dict) -> str:
          f"  favori gagnant     {b['top1_reussites']:>6} / {b['n_courses']:<7}"
          f"  {b['top1_taux']:>6.1%}",
          f"  intervalle à 95 %  [{b['top1_ic95'][0]:>5.1%} ; {b['top1_ic95'][1]:>5.1%}]",
-         f"  Brier              {b['brier']:>16.5f}",
-         f"  ECE                {b['ece']:>16.5f}"]
+         # `_json_sur` transforme les NaN en None : le format numérique
+         # lèverait dessus, et c'est précisément quand une tranche est
+         # vide qu'on vient lire ce tableau.
+         f"  Brier              {_ou_tiret(b.get('brier')):>16}",
+         f"  ECE                {_ou_tiret(b.get('ece')):>16}"]
     m = b.get("marche")
     if m and m.get("top1_taux") is not None:
         L.append(f"  favori du public   {m['top1_reussites']:>6} / {m['n_courses']:<7}"
