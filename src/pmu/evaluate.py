@@ -589,3 +589,98 @@ def afficher(rap: dict) -> str:
                      f"{s['brier_skill']:>+8.4f} {str(s['auc']):>7}")
         L.append("  → si les scores divergent fortement, scinder le modèle par discipline")
     return "\n".join(L)
+
+# ---------------------------------------------------------------------
+# 4 ter. L'échelle de confiance, de 1 à 5
+# ---------------------------------------------------------------------
+#
+# CE QUE LA NOTE DIT, ET CE QU'ELLE NE DIT PAS
+#
+# Elle dit : « dans cette course, le modèle détache son favori plus
+# nettement que dans X % des courses ». C'est une mesure de TRANCHANT,
+# pas une promesse de gain.
+#
+# Les seuils ne sont pas choisis à la main : ce sont les quintiles de
+# `ecart_top2` observés sur la fenêtre de test. Chaque niveau porte donc
+# son taux de réussite RÉEL, et celui du favori du public sur les mêmes
+# courses. Une note de 5/5 dont le taux est inférieur au marché reste
+# une note de 5/5 — et le dire est le seul usage honnête de l'échelle.
+#
+# `fiable` n'est vrai que si, à ce niveau, le modèle a fait AU MOINS
+# aussi bien que le public sur un effectif suffisant. C'est cette
+# valeur, et elle seule, qui autorise l'affichage en vert.
+
+MIN_COURSES_NIVEAU = 40
+
+
+def echelle_confiance(df: pd.DataFrame, *, cible="y_gagnant", n=5) -> dict:
+    """
+    Découpe `ecart_top2` en cinq niveaux et mesure ce que vaut chacun.
+
+    `df` = fenêtre de test déjà notée (course_id, proba, ecart_top2).
+    """
+    if "ecart_top2" not in df.columns or df.empty:
+        return {"seuils": [], "niveaux": []}
+
+    favoris = df.loc[df.groupby("course_id")["proba"].idxmax()].copy()
+    if len(favoris) < n * MIN_COURSES_NIVEAU:
+        return {"seuils": [], "niveaux": []}
+
+    bornes = favoris["ecart_top2"].quantile([i / n for i in range(1, n)]).tolist()
+    bornes = sorted(round(float(b), 5) for b in bornes)
+    favoris["note"] = 1
+    for b in bornes:
+        favoris["note"] += (favoris["ecart_top2"] > b).astype(int)
+
+    niveaux = []
+    for note, sub in favoris.groupby("note"):
+        k = len(sub)
+        reussites = int(sub[cible].sum())
+        ligne = {
+            "note": int(note), "n_courses": k,
+            "taux": round(reussites / k, 4) if k else None,
+            "ic95": [round(x, 4) for x in _intervalle_binomial(reussites, k)],
+            "taux_marche": None, "fiable": False,
+        }
+        if "mkt_proba_implicite" in df.columns:
+            memes = df[df["course_id"].isin(sub["course_id"])]
+            memes = memes[memes["mkt_proba_implicite"].notna()]
+            if len(memes):
+                idx = memes.groupby("course_id")["mkt_proba_implicite"].idxmax()
+                tm = float(memes.loc[idx, cible].mean())
+                ligne["taux_marche"] = round(tm, 4)
+                # Le vert ne s'allume que sur une comparaison tenue.
+                ligne["fiable"] = bool(k >= MIN_COURSES_NIVEAU
+                                       and ligne["taux"] is not None
+                                       and ligne["taux"] >= tm)
+        niveaux.append(ligne)
+    return {"seuils": bornes, "niveaux": niveaux}
+
+
+def note_confiance(ecart: float | None, seuils: list) -> int:
+    """Écart 1ᵉʳ/2ᵉ → note de 1 à 5, selon les seuils mesurés."""
+    if ecart is None or not seuils:
+        return 1
+    try:
+        e = float(ecart)
+    except (TypeError, ValueError):
+        return 1
+    return 1 + sum(1 for b in seuils if e > b)
+
+
+def afficher_echelle(ech: dict) -> str:
+    niveaux = ech.get("niveaux") or []
+    if not niveaux:
+        return ("── Échelle de confiance " + "─" * 35
+                + "\n  pas assez de courses pour établir les niveaux")
+    L = ["── Échelle de confiance " + "─" * 35,
+         f"  {'note':>5} {'courses':>8} {'modèle':>9} {'marché':>9}  verdict"]
+    for x in sorted(niveaux, key=lambda v: v["note"]):
+        tm = x.get("taux_marche")
+        L.append(f"  {'★' * x['note']:>5} {x['n_courses']:>8} {x['taux']:>9.1%} "
+                 f"{('—' if tm is None else f'{tm:.1%}'):>9}  "
+                 + ("au niveau du marché" if x["fiable"] else "en dessous du marché"))
+    L.append("  → la note mesure le TRANCHANT du modèle, pas une promesse.")
+    L.append("    Seul un niveau « au niveau du marché » est mis en avant.")
+    return "\n".join(L)
+

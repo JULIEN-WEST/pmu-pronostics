@@ -104,6 +104,12 @@ def _preparer(courses: list[dict]) -> list[dict]:
             # la course, mais on le dit : masquer reviendrait à cacher
             # ses échecs, et le taux de réussite ne serait plus lisible.
             "publiable": bool(c.get("publiable", True)),
+            # Note de tranchant, 1 à 5, seuils mesurés sur la fenêtre de
+            # test. `certifie` n'est vrai que si ce niveau a réellement
+            # tenu face au marché : c'est lui, et lui seul, qui allume
+            # le vert.
+            "note": int(c.get("note") or 1),
+            "certifie": bool(c.get("note_fiable")),
             "selection": sel,
         })
     return out
@@ -167,6 +173,11 @@ h1,h2,h3{margin:0;font-weight:650;letter-spacing:-.01em}
 .rail button:hover{border-color:var(--accent)}
 .rail button.actif{border-color:var(--accent);
   box-shadow:inset 0 0 0 1px var(--accent)}
+/* Vert = ce niveau de confiance a tenu face au marché SUR LA MESURE.
+   Jamais une promesse de gain : voir la note de bas de page. */
+.rail button.certifie{border-color:var(--vert);
+  box-shadow:inset 0 0 0 1px var(--vert)}
+.rail .etoiles{color:var(--or);letter-spacing:.06em}
 .rail b{display:block;font-size:12px;letter-spacing:.02em}
 /* `block` est indispensable : sans lui les deux libellés se collent et
    on lit « La Capellefavori battu ». */
@@ -193,6 +204,10 @@ h1,h2,h3{margin:0;font-weight:650;letter-spacing:-.01em}
 .marche .nom{font-weight:650;margin:2px 0 0;font-size:14.5px}
 .marche .pc{font-size:23px;font-weight:700;letter-spacing:-.02em}
 .marche.or{border-color:var(--or)} .marche.or .pc{color:var(--or)}
+#course>.carte.certifie{border-color:var(--vert);
+  box-shadow:0 0 0 1px var(--vert), var(--ombre)}
+.etoiles{color:var(--or);letter-spacing:.08em;font-size:14px}
+.puce.vert{background:rgba(15,157,88,.16);color:var(--vert)}
 
 /* ── tableau du classement ───────────────────────────── */
 .ligne{display:grid;grid-template-columns:28px 1fr 92px;gap:10px;
@@ -316,11 +331,14 @@ function rendreCourse(c){
 
   const conf = c.confiance*100;
   const niveau = conf>10?"élevée":(conf>5?"moyenne":"faible");
-  return `<div class="carte">
+  return `<div class="carte ${c.certifie?"certifie":""}">
       <div class="titre">
         <h2>${E(c.code)} · ${E(c.hippodrome)}</h2>
         <span class="puce">${E(c.heure)}</span>
+        <span class="etoiles" title="tranchant du modele">${
+          "★".repeat(c.note)}${"☆".repeat(5-c.note)}</span>
         <span class="puce">confiance ${niveau}</span>
+        ${c.certifie?'<span class="puce vert">niveau tenu face au marche</span>':""}
         ${c.publiable===false?'<span class="puce seuil">sous le seuil de confiance</span>':""}
       </div>
       <div class="meta">${E(c.libelle)} — ${E(c.discipline)} ·
@@ -497,8 +515,9 @@ def page(courses: list[dict], *, jour: date, meta: dict | None = None,
 
     if data:
         rail = "".join(
-            f'<button class="{"" if c["publiable"] else "muette"}">'
+            f'<button class="{" ".join(x for x in ("" if c["publiable"] else "muette", "certifie" if c["certifie"] else "") if x)}">'
             f'<b>{html.escape(c["code"] or "")}</b>'
+            f'<span class="etoiles">{"★" * c["note"]}{"☆" * (5 - c["note"])}</span>'
             f'<span>{html.escape(c["heure"])} · {html.escape(c["hippodrome"])}</span>'
             + _verdict(c)
             + "</button>"

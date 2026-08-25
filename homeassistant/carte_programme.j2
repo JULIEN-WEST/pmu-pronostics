@@ -1,0 +1,102 @@
+{%- macro joli(t) -%}{{ t | default('', true) | lower | title
+  | replace(' Du ', ' du ') | replace(' De ', ' de ') | replace(' Des ', ' des ')
+  | replace(' Le ', ' le ') | replace(' La ', ' la ') | replace(' Les ', ' les ')
+  | replace(' Et ', ' et ') | replace(' Au ', ' au ') | replace(' Aux ', ' aux ')
+  | replace(" D'", " d'") | replace(" L'", " l'") }}{%- endmacro -%}
+{%- macro lieu(t) -%}{{ joli(t | default('', true)
+  | replace('HIPPODROME DE ', '') | replace("HIPPODROME D'", '')
+  | replace('HIPPODROME ', '')) }}{%- endmacro -%}
+{%- macro etoiles(n) -%}{{ ("★" * (n | int(0))) ~ ("☆" * (5 - (n | int(0)))) }}{%- endmacro -%}
+{%- set jour = state_attr('sensor.pmu_courses', 'date') -%}
+{%- set prog = state_attr('sensor.pmu_courses', 'programme') or [] -%}
+{%- set total = states('sensor.pmu_courses') -%}
+{%- set faites = prog | selectattr('arrivee_connue') | list | length -%}
+{%- set ns = namespace(l=[], trous=0, notes=false, top=none, tn=0, tc=-1) -%}
+{%- for c in prog -%}
+{%- set n = c.get('note') -%}
+{%- if n is not none -%}
+{%- set ns.notes = true -%}
+{%- set ec = c.get('confiance') | float(0) -%}
+{%- if (not c.get('arrivee_connue')) and (n | int(0)) >= 4 and c.get('selection')
+       and ((n | int(0)) > ns.tn or ((n | int(0)) == ns.tn and ec > ns.tc)) -%}
+{%- set ns.top = c -%}
+{%- set ns.tn = n | int(0) -%}
+{%- set ns.tc = ec -%}
+{%- endif -%}
+{%- endif -%}
+{%- endfor -%}
+{%- set ns.l = [
+    "## Programme du " ~ ((jour | as_datetime).strftime('%d/%m') if jour else "—"), "",
+    total ~ " courses aujourd'hui · " ~ (prog | length) ~ " détaillées ici · "
+      ~ faites ~ " déjà courues", ""] -%}
+{%- if ns.top -%}
+{%- set t = ns.top -%}
+{%- set s = t.selection[0] -%}
+{%- set h = (t.depart | as_datetime | as_local).strftime('%H:%M') if t.depart else "—" -%}
+{%- set ns.l = ns.l + [
+    "> 🟢 **Course la plus tranchée à venir — " ~ t.code ~ " · " ~ lieu(t.hippodrome)
+      ~ " à " ~ h ~ "**",
+    "> " ~ etoiles(ns.tn) ~ " — **" ~ s.num ~ "** " ~ joli(s.cheval | default("?", true))
+      ~ " à " ~ ((s.proba | float(0)) * 100) | round(1) ~ " %",
+    ">",
+    "> *" ~ ("À ce niveau de tranchant, le modèle a fait au moins aussi bien que le"
+      ~ " favori du public lors de la dernière mesure."
+      if t.get('note_fiable') else
+      "À ce niveau, le modèle n'a PAS égalé le favori du public lors de la dernière"
+      ~ " mesure. Le tranchant n'est pas une promesse de gain.") ~ "*", ""] -%}
+{%- endif -%}
+{%- if ns.notes -%}
+{%- set ns.l = ns.l + ["| Course | Départ | Hippodrome | Favori du modèle | Tranchant |",
+                       "|:-------|-------:|:-----------|:-----------------|:----------|"] -%}
+{%- else -%}
+{%- set ns.l = ns.l + ["| Course | Départ | Hippodrome | Favori du modèle |",
+                       "|:-------|-------:|:-----------|:-----------------|"] -%}
+{%- endif -%}
+{%- for c in prog -%}
+{%- set top = c.selection[0] if c.selection else none -%}
+{%- if not top -%}
+{%- set etat = "" -%}
+{%- elif not c.get('arrivee_connue') -%}
+{%- set etat = "🕐" -%}
+{%- elif top.get('arrivee') is none -%}
+{%- set etat = "❔" -%}
+{%- set ns.trous = ns.trous + 1 -%}
+{%- elif top.get('arrivee') == 1 -%}
+{%- set etat = "✅" -%}
+{%- else -%}
+{%- set etat = "✖️" -%}
+{%- endif -%}
+{%- set choix = "—" if not top else (etat ~ " **" ~ top.num ~ "** "
+      ~ joli(top.cheval | default("?", true))
+      ~ " · " ~ ((top.proba | float(0)) * 100) | round | int ~ " %") -%}
+{%- set n = c.get('note') -%}
+{%- set et = "—" if n is none else (("**" ~ etoiles(n) ~ "**")
+      if c.get('note_fiable') else etoiles(n)) -%}
+{%- set et = (et ~ " 🟢") if (ns.top and c.code == ns.top.code) else et -%}
+{%- set ligne = "| **" ~ c.code ~ "** | "
+    ~ ((c.depart | as_datetime | as_local).strftime('%H:%M') if c.depart else "—")
+    ~ " | " ~ lieu(c.hippodrome) ~ " | " ~ choix ~ " |" -%}
+{%- set ns.l = ns.l + [(ligne ~ " " ~ et ~ " |") if ns.notes else ligne] -%}
+{%- endfor -%}
+{%- if ns.trous -%}
+{%- set ns.l = ns.l + ["",
+    "> ❔ **" ~ ns.trous ~ " course(s) arrivée(s) dont la place du favori est"
+    ~ " inconnue.** L'arrivée n'a pas été propagée jusqu'aux partants."] -%}
+{%- endif -%}
+{%- if ns.notes -%}
+{%- set ns.l = ns.l + ["",
+    "*✅ le favori du modèle a gagné · ✖️ non · 🕐 course à venir · ❔ arrivée non"
+    ~ " renseignée.*", "",
+    "***Tranchant** (☆ à ★★★★★) : à quel point le modèle sépare son 1ᵉʳ choix du 2ᵉ,"
+    ~ " situé dans les cinq quintiles mesurés sur la fenêtre de test. Les étoiles en"
+    ~ " **gras** signalent un niveau où le modèle a au moins égalé le favori du public"
+    ~ " lors de la dernière mesure ; en maigre, il ne l'a pas égalé. Un tranchant élevé"
+    ~ " dit que le modèle hésite peu — pas qu'il a raison, et jamais qu'il faut miser.*"] -%}
+{%- else -%}
+{%- set ns.l = ns.l + ["",
+    "*✅ le favori du modèle a gagné · ✖️ non · 🕐 course à venir · ❔ arrivée non"
+    ~ " renseignée.*", "",
+    "*La colonne **Tranchant** apparaîtra après la mise à jour de la pile en 1.5 :"
+    ~ " elle note chaque course de ☆ à ★★★★★ selon l'écart entre le 1ᵉʳ et le 2ᵉ choix.*"] -%}
+{%- endif -%}
+{{ ns.l | join('\n') }}
