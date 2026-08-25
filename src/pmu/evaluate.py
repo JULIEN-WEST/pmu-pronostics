@@ -37,10 +37,18 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import brier_score_loss, log_loss, roc_auc_score
 
-# Prélèvement moyen. À VÉRIFIER sur les rapports réels avant toute
-# conclusion : il dépend du type de pari (le Simple est le moins taxé,
-# les paris combinés le sont beaucoup plus).
-PRELEVEMENT_DEFAUT = 0.15
+# Prélèvement du Simple Gagnant. Ce n'est plus une supposition :
+# `surcote()` l'a MESURÉ à 15,6 % sur 2 249 courses de la base de
+# production (somme des probabilités implicites = 1,1844, très serrée —
+# Q1 1,1787, Q3 1,1905).
+#
+# ⚠️ Et la mesure a livré autre chose : cette somme vaut 1,18 et non
+# 1,00, donc la cote affichée est DÉJÀ NETTE du prélèvement. La
+# multiplier par (1 − t) le retire une seconde fois. C'est pourquoi
+# `simulation()` doit être payée aux rapports RÉELS dès qu'ils sont
+# collectés — voir `col_reel`. Le paramètre ci-dessous ne sert plus
+# qu'au repli, quand aucun rapport n'a encore été collecté.
+PRELEVEMENT_DEFAUT = 0.156
 
 
 # ---------------------------------------------------------------------
@@ -772,11 +780,28 @@ SQL_RAPPORTS = """
 
 def verifier_rapports(conn, depuis, jusqua, *, prelevement=PRELEVEMENT_DEFAUT) -> dict:
     """
-    Compare la cote relevée au rapport réellement payé, sur les gagnants.
+    De combien la cote pré-départ diffère-t-elle du rapport payé ?
 
-    Ne renvoie JAMAIS de conclusion quand l'échantillon est trop mince :
-    c'est précisément le genre de question qu'on n'a le droit de
-    trancher qu'une fois.
+    ⚠️ CETTE MESURE NE TRANCHE PAS LE PRÉLÈVEMENT. Elle a d'abord été
+    écrite pour ça et elle avait tort : sur la base de production elle
+    a conclu « cote brute » (ratio 0,886, dans la tolérance de 0,85)
+    alors que `surcote()` — qui lit toutes les courses et tous les
+    partants — a mesuré 1,1844, c'est-à-dire une cote DÉJÀ NETTE d'un
+    prélèvement de 15,6 %.
+
+    Deux défauts l'expliquent, et aucun n'est réparable :
+
+      1. Elle ne voit que les GAGNANTS. Or un gagnant est justement un
+         cheval sur lequel l'argent est venu — donc dont le prix a
+         raccourci. Biais de sélection, dans le sens observé.
+      2. La cote relevée n'est pas le prix de clôture. L'argent des
+         dernières minutes déplace le rapport après le dernier relevé.
+
+    Ce qu'elle mesure VRAIMENT est donc la DÉRIVE : le facteur par
+    lequel il faut multiplier la cote affichée pour obtenir ce qui sera
+    réellement versé. C'est utile — c'est même exactement ce dont la
+    simulation de rentabilité a besoin — mais ce n'est pas le
+    prélèvement. Pour le prélèvement : `surcote()`.
     """
     try:
         rows = conn.execute(SQL_RAPPORTS, (depuis, jusqua)).fetchall()
@@ -793,37 +818,30 @@ def verifier_rapports(conn, depuis, jusqua, *, prelevement=PRELEVEMENT_DEFAUT) -
                             "connu ; lancer d'abord `python -m pmu.collect "
                             "rapports`")}
 
-    # `parse_rapports_definitifs` rend DÉJÀ des euros perçus pour 1 €
-    # misé (le champ `dividendePourUnEuro`, converti de centimes). Ne
-    # PAS rediviser par la mise de base : elle ne sert plus qu'à
-    # documenter la ligne, et diviser une seconde fois par 2 ferait
-    # passer une cote nette pour une cote brute.
     d["ratio"] = d["rapport"] / d["cote"]
     med = float(d["ratio"].median())
 
-    if abs(med - 1.0) <= RATIO_TOLERANCE:
-        verdict = "cote_nette"
-        message = ("La cote relevée EST le rapport payé : elle est déjà nette "
-                   "de prélèvement. La simulation le retire une seconde fois, "
-                   "donc elle SOUS-ESTIME le ROI.")
-        correction = 1.0 / (1.0 - prelevement)
-    elif abs(med - (1.0 - prelevement)) <= RATIO_TOLERANCE:
-        verdict = "cote_brute"
-        message = ("La cote relevée est brute : le prélèvement doit bien être "
-                   "appliqué. La simulation de rentabilité est juste.")
-        correction = 1.0
-    elif med > 20:
+    if med > 20:
+        # Le garde-fou d'unité : il ne coûte rien et attrapera un
+        # changement de format côté PMU.
         verdict = "unite"
         message = (f"Le rapport vaut {med:.0f} fois la cote : il est presque "
                    "certainement exprimé en centimes. À corriger avant toute "
                    "lecture économique.")
-        correction = None
+    elif med < 0.97:
+        verdict = "derive_baissiere"
+        message = (f"Le rapport payé vaut {med:.3f} fois la cote affichée : "
+                   f"un pari gagnant rend {1 - med:.1%} de MOINS que ce que "
+                   "l'écran annonçait. L'argent tardif raccourcit le prix des "
+                   "chevaux qui gagnent.")
+    elif med <= 1.03:
+        verdict = "stable"
+        message = ("Le rapport payé est proche de la cote affichée : la "
+                   "dérive tardive est négligeable sur cette base.")
     else:
-        verdict = "inattendu"
-        message = (f"Ratio médian {med:.3f} — ni 1 (cote nette), ni "
-                   f"{1 - prelevement:.2f} (cote brute). Ne rien conclure : "
-                   "regarder d'abord quelques lignes à la main.")
-        correction = None
+        verdict = "derive_haussiere"
+        message = (f"Le rapport payé vaut {med:.3f} fois la cote affichée : "
+                   "les gagnants sont payés PLUS que l'écran ne l'annonçait.")
 
     return {
         "n": int(len(d)),
@@ -835,9 +853,33 @@ def verifier_rapports(conn, depuis, jusqua, *, prelevement=PRELEVEMENT_DEFAUT) -
         "rapport_median": round(float(d["rapport"].median()), 2),
         "verdict": verdict,
         "message": message,
-        # Facteur à appliquer aux ROI déjà publiés pour les corriger.
-        "correction_roi": None if correction is None else round(correction, 4),
+        # Facteur à appliquer à un ROI simulé en `cote × (1 − prélèvement)`
+        # pour le ramener au tarif réel. Provisoire : depuis la 1.8 la
+        # simulation paie directement les rapports collectés.
+        "correction_roi": (None if verdict == "unite"
+                           else round(med / (1 - prelevement), 4)),
     }
+
+
+def afficher_rapports(v: dict) -> str:
+    L = ["── Dérive : cote affichée contre rapport payé " + "─" * 14]
+    if v.get("verdict") in (None, "indisponible", "insuffisant"):
+        L.append(f"  {v.get('message', 'rien à mesurer')}")
+        L.append(f"  gagnants exploitables : {v.get('n', 0)}")
+        return "\n".join(L)
+    L += [
+        f"  gagnants comparés        {v['n']} sur {v['courses']} courses",
+        f"  cote médiane             {v['cote_mediane']}",
+        f"  rapport payé médian      {v['rapport_median']}",
+        f"  rapport / cote           {v['ratio_median']}"
+        f"   (Q1 {v['ratio_q1']} — Q3 {v['ratio_q3']})",
+        "",
+        "  " + v["message"],
+        "",
+        "  ⚠ mesuré sur les GAGNANTS seuls : c'est une dérive, PAS le",
+        "    prélèvement. Pour le prélèvement, lire le bloc au-dessus.",
+    ]
+    return "\n".join(L)
 
 
 # ---------------------------------------------------------------------
@@ -951,26 +993,6 @@ def afficher_surcote(v: dict) -> str:
     if v.get("prelevement_mesure") is not None:
         L.append(f"  prélèvement déduit       {v['prelevement_mesure']:.1%}")
     L += ["", "  " + v["message"]]
-    return "\n".join(L)
-
-
-def afficher_rapports(v: dict) -> str:
-    L = ["── Cote relevée contre rapport payé " + "─" * 24]
-    if v.get("verdict") in (None, "indisponible", "insuffisant"):
-        L.append(f"  {v.get('message', 'rien à mesurer')}")
-        L.append(f"  gagnants exploitables : {v.get('n', 0)}")
-        return "\n".join(L)
-    L += [
-        f"  gagnants comparés        {v['n']} sur {v['courses']} courses",
-        f"  cote médiane             {v['cote_mediane']}",
-        f"  rapport payé médian      {v['rapport_median']}",
-        f"  ratio rapport / cote     {v['ratio_median']}"
-        f"   (Q1 {v['ratio_q1']} — Q3 {v['ratio_q3']})",
-        "",
-        "  " + v["message"],
-    ]
-    if v.get("correction_roi") and v["correction_roi"] != 1.0:
-        L.append(f"  → multiplier (1 + ROI) par {v['correction_roi']} pour corriger")
     return "\n".join(L)
 
 

@@ -277,3 +277,51 @@ def test_une_course_sans_rapport_est_comptee_sans_planter(monkeypatch):
                          "date_reunion": JOUR}])
     out = collect.rafraichir_rapports(conn, Muet(), JOUR, JOUR)
     assert out == {"courses": 0, "lignes": 0, "vides": 1}
+
+
+# ---------------------------------------------------------------------
+# 4. Les unités : montantPrix est en EUROS
+# ---------------------------------------------------------------------
+#
+# Le PMU mélange les unités d'un champ à l'autre, et rien dans la
+# réponse ne le signale. `dividendePourUnEuro` est en centimes ;
+# `montantPrix` ne l'est pas. Traiter le second comme le premier
+# affichait des courses dotées de 173 € et 259 € — des montants qui
+# n'existent pas, mais qui ne lèvent aucune erreur.
+#
+# Relevé en production le 25/08/2026 : l'API rend 17300, 31100, 25900,
+# 22000, 21000, 6000, 2500. Toutes plausibles telles quelles.
+
+from pmu.normalize import parse_course  # noqa: E402
+
+
+@pytest.mark.parametrize("brut, attendu", [
+    (17300, 17300.0),   # Vichy, plat 2500 m
+    (31100, 31100.0),
+    (25900, 25900.0),
+    (6000, 6000.0),     # La Capelle, attelé
+    (2500, 2500.0),     # Tongres, réunion belge
+])
+def test_l_allocation_est_en_euros(brut, attendu):
+    c = parse_course({"numReunion": 1, "numOrdre": 1, "montantPrix": brut},
+                     date(2026, 8, 25))
+    assert c["montant_prix"] == pytest.approx(attendu), (
+        "une allocation divisée par 100 donne des courses dotées de 173 €"
+    )
+
+
+def test_une_allocation_absente_ou_illisible_rend_none():
+    for brut in (None, "", "abc", {}):
+        c = parse_course({"numReunion": 1, "numOrdre": 1, "montantPrix": brut},
+                         date(2026, 8, 25))
+        assert c["montant_prix"] is None
+
+
+def test_les_gains_des_chevaux_restent_en_centimes():
+    """
+    Le correctif ne doit PAS déborder : les gains d'un cheval, eux, sont
+    bien en centimes. Corriger les deux au même endroit aurait créé
+    l'erreur symétrique.
+    """
+    from pmu.normalize import cents_to_eur
+    assert cents_to_eur(4820000) == pytest.approx(48200.0)

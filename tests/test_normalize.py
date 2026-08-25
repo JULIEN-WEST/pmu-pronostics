@@ -248,14 +248,21 @@ def test_parse_course_terrain_galop_via_penetrometre():
         "numOrdre": 3,
         "distance": 2400,
         "discipline": "PLAT",
-        "montantPrix": 5200000,
+        # Relevé en production : l'API rend l'allocation en EUROS.
+        # Ce nombre valait 5 200 000 dans une version antérieure de ce
+        # test — une valeur que j'avais INVENTÉE en supposant des
+        # centimes, et qui a fait afficher des courses dotées de 259 €.
+        "montantPrix": 52000,
         "penetrometre": {"intitule": "BON SOUPLE", "valeurMesure": 3.4},
         "heureDepart": 1787515200000,
     }
     row = nz.parse_course(course, date(2026, 8, 23))
     assert row["etat_terrain"] == "BON SOUPLE"
     assert row["penetrometre"] == 3.4
-    assert row["montant_prix"] == 52000.0
+    assert row["montant_prix"] == 52000.0, (
+        "l'allocation est en euros : la diviser par 100 invente des "
+        "courses dotées de quelques centaines d'euros"
+    )
     assert row["heure_depart"] is not None
 
 

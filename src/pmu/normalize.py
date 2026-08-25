@@ -372,7 +372,16 @@ def parse_course(course: dict, date_reunion: date | None) -> dict:
         "distance_unit": course.get("distanceUnit"),
         "corde": course.get("corde"),
         "depart_type": course.get("departType") or course.get("typeDepart"),
-        "montant_prix": cents_to_eur(course.get("montantPrix")),
+        # ⚠️ EN EUROS, contrairement aux gains des chevaux. Relevé en
+        # production le 25/08/2026 : l'API rend 17300, 31100, 25900,
+        # 22000, 6000 — des allocations parfaitement plausibles telles
+        # quelles. Les avoir traitées comme des centimes affichait des
+        # courses dotées de 173 € et de 259 €, ce qui n'existe pas.
+        #
+        # La leçon vaut au-delà de ce champ : le PMU mélange les unités
+        # d'un champ à l'autre (cf. `dividendePourUnEuro`, lui en
+        # centimes). Vérifier chaque montant, ne jamais généraliser.
+        "montant_prix": as_float(course.get("montantPrix")),
         "nombre_declares_partants": as_int(course.get("nombreDeclaresPartants")),
         "nombre_partants": as_int(course.get("nombrePartants")),
         "etat_terrain": etat_terrain,

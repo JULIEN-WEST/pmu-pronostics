@@ -213,78 +213,91 @@ def _lignes(ratio, n=120, cote=6.0, mise_base=1.0):
     return [(i, 7, cote, cote * ratio, mise_base) for i in range(n)]
 
 
-def test_une_cote_deja_nette_est_reconnue():
+def test_la_derive_baissiere_est_mesuree():
     """
-    Le cas qui changerait la lecture du projet : rapport payé = cote.
-    La simulation retire alors le prélèvement une SECONDE fois.
+    LE cas de production : sur 584 gagnants, le rapport payé vaut 0,886
+    fois la cote affichée. Un pari gagnant rend 11 % de moins que ce que
+    l'écran annonçait, parce que l'argent tardif raccourcit le prix des
+    chevaux qui gagnent.
     """
-    v = ev.verifier_rapports(FausseConn(_lignes(1.0)), date(2026, 1, 1), date(2026, 12, 31))
-    assert v["verdict"] == "cote_nette"
-    assert v["correction_roi"] == pytest.approx(1 / 0.85, rel=1e-3)
-    assert "SOUS-ESTIME" in v["message"]
+    v = ev.verifier_rapports(FausseConn(_lignes(0.886)),
+                             date(2026, 1, 1), date(2026, 12, 31))
+    assert v["verdict"] == "derive_baissiere"
+    assert v["ratio_median"] == pytest.approx(0.886)
+    assert "MOINS" in v["message"]
 
 
-def test_une_cote_brute_est_reconnue():
-    """L'autre cas : la simulation actuelle est juste, rien à corriger."""
-    v = ev.verifier_rapports(FausseConn(_lignes(0.85)), date(2026, 1, 1), date(2026, 12, 31))
-    assert v["verdict"] == "cote_brute"
-    assert v["correction_roi"] == 1.0
+def test_une_cote_fidele_au_rapport_est_dite_stable():
+    v = ev.verifier_rapports(FausseConn(_lignes(1.0)),
+                             date(2026, 1, 1), date(2026, 12, 31))
+    assert v["verdict"] == "stable"
+
+
+def test_cette_mesure_ne_tranche_plus_le_prelevement():
+    """
+    LA correction. Cette fonction a d'abord prétendu trancher le
+    prélèvement, et elle a conclu « cote brute » sur un ratio de 0,886 —
+    alors que `surcote()`, qui lit toutes les courses et tous les
+    partants, mesurait une cote DÉJÀ NETTE. Elle avait tort : elle ne
+    voit que les gagnants, c'est-à-dire les chevaux dont le prix a
+    raccourci.
+
+    Aucun verdict de cette fonction ne doit plus parler de cote brute
+    ou nette.
+    """
+    for ratio in (0.85, 0.886, 1.0, 1.1765):
+        v = ev.verifier_rapports(FausseConn(_lignes(ratio)),
+                                 date(2026, 1, 1), date(2026, 12, 31))
+        assert v["verdict"] not in ("cote_brute", "cote_nette"), (ratio, v)
+        assert "brute" not in v["message"].lower()
+        assert "nette" not in v["message"].lower()
+
+
+def test_le_facteur_de_correction_ramene_au_tarif_reel():
+    """
+    Une simulation qui payait `cote × (1 − prélèvement)` alors que le
+    tarif réellement versé est `cote × 0,886` sous-estimait le retour.
+    """
+    v = ev.verifier_rapports(FausseConn(_lignes(0.886)),
+                             date(2026, 1, 1), date(2026, 12, 31))
+    assert v["correction_roi"] == pytest.approx(
+        0.886 / (1 - ev.PRELEVEMENT_DEFAUT), rel=1e-3)
 
 
 def test_un_rapport_en_centimes_est_signale_comme_tel():
     """Une question d'unité ne doit jamais être lue comme une question d'économie."""
-    v = ev.verifier_rapports(FausseConn(_lignes(100.0)), date(2026, 1, 1), date(2026, 12, 31))
+    v = ev.verifier_rapports(FausseConn(_lignes(100.0)),
+                             date(2026, 1, 1), date(2026, 12, 31))
     assert v["verdict"] == "unite"
-    assert v["correction_roi"] is None
-
-
-def test_un_ratio_inattendu_ne_conclut_rien():
-    """
-    0,6 n'est ni 1 ni 0,85. Le bon comportement est de refuser de
-    trancher — pas de choisir le voisin le plus proche.
-    """
-    v = ev.verifier_rapports(FausseConn(_lignes(0.60)), date(2026, 1, 1), date(2026, 12, 31))
-    assert v["verdict"] == "inattendu"
     assert v["correction_roi"] is None
 
 
 def test_la_chaine_complete_sur_la_charge_reelle():
     """
-    Bout en bout, avec la vraie charge : le parseur rend 1,90 €, et si
-    la cote relevée valait elle aussi 1,90, le verdict doit être
-    « cote déjà nette ».
-
-    C'est le test qui compte : il enchaîne la conversion des centimes,
-    l'absence de division par la mise de base, et le diagnostic. Une
-    division de trop quelque part et le ratio tombe à 0,95 — soit
-    exactement dans la zone « cote brute », donc un contresens complet
-    et silencieux.
+    Bout en bout : le parseur rend 1,90 € pour la charge réelle, et une
+    cote de 1,90 donne un ratio de 1,00 — donc « stable ». Une division
+    de trop quelque part et le ratio tomberait à 0,95.
     """
     l = _par_cle(CHARGE_REELLE)[("SIMPLE_GAGNANT", "9")]
     lignes = [(i, 9, 1.90, l["rapport"], l["mise_base"]) for i in range(80)]
     v = ev.verifier_rapports(FausseConn(lignes), date(2026, 1, 1), date(2026, 12, 31))
     assert v["ratio_median"] == pytest.approx(1.0, abs=1e-6)
-    assert v["verdict"] == "cote_nette", v
+    assert v["verdict"] == "stable", v
 
 
 def test_la_mise_de_base_n_intervient_plus_dans_le_ratio():
     """
     Le rapport arrive DÉJÀ ramené à 1 € misé. Rediviser par la mise de
-    base ferait passer une cote nette (ratio 1) pour une cote brute
-    (ratio 0,5 avec une base à 2 €) — l'erreur qui inverserait la
-    conclusion du projet.
+    base ferait chuter le ratio de moitié et inventerait une dérive qui
+    n'existe pas.
     """
     v = ev.verifier_rapports(FausseConn(_lignes(1.0, mise_base=2.0)),
                              date(2026, 1, 1), date(2026, 12, 31))
     assert v["ratio_median"] == pytest.approx(1.0)
-    assert v["verdict"] == "cote_nette", v
+    assert v["verdict"] == "stable", v
 
 
 def test_un_echantillon_mince_ne_tranche_pas():
-    """
-    Cette question ne se tranche qu'une fois. Vingt gagnants ne
-    suffisent pas, et un verdict prématuré serait recopié partout.
-    """
     v = ev.verifier_rapports(FausseConn(_lignes(1.0, n=20)),
                              date(2026, 1, 1), date(2026, 12, 31))
     assert v["verdict"] == "insuffisant"
@@ -305,7 +318,7 @@ def test_les_lignes_absurdes_sont_ecartees():
     lignes = _lignes(1.0, n=100) + [(999, 7, 0.5, 4.0, 1.0), (998, 7, 6.0, 0.0, 1.0)]
     v = ev.verifier_rapports(FausseConn(lignes), date(2026, 1, 1), date(2026, 12, 31))
     assert v["n"] == 100
-    assert v["verdict"] == "cote_nette"
+    assert v["verdict"] == "stable"
 
 
 def test_la_mediane_resiste_a_quelques_outsiders():
@@ -315,18 +328,25 @@ def test_la_mediane_resiste_a_quelques_outsiders():
     """
     lignes = _lignes(1.0, n=100) + [(900 + i, 7, 3.0, 300.0, 1.0) for i in range(8)]
     v = ev.verifier_rapports(FausseConn(lignes), date(2026, 1, 1), date(2026, 12, 31))
-    assert v["verdict"] == "cote_nette"
+    assert v["verdict"] == "stable"
 
 
 # ---------------------------------------------------------------------
 # 3. L'affichage
 # ---------------------------------------------------------------------
 
-def test_le_texte_dit_le_verdict_et_la_correction():
-    v = ev.verifier_rapports(FausseConn(_lignes(1.0)), date(2026, 1, 1), date(2026, 12, 31))
+def test_le_texte_previent_contre_la_mauvaise_lecture():
+    """
+    Le texte doit dire lui-même qu'il ne parle PAS du prélèvement.
+    C'est exactement la confusion qui a produit deux verdicts opposés
+    dans la même sortie de production.
+    """
+    v = ev.verifier_rapports(FausseConn(_lignes(0.886)),
+                             date(2026, 1, 1), date(2026, 12, 31))
     texte = ev.afficher_rapports(v)
     assert "rapport payé" in texte
-    assert "1.1765" in texte or "multiplier" in texte
+    assert "GAGNANTS" in texte
+    assert "PAS le" in texte and "prélèvement" in texte
 
 
 def test_un_diagnostic_impossible_s_affiche_quand_meme():

@@ -298,9 +298,29 @@ def inspecter_montants(conn, client: PmuClient, jour: date) -> str:
                  f" {str(mp if mp is not None else '—'):>14}"
                  f" {str(d.get('montant_prix') or '—'):>12}")
     L += ["",
-          "  Lecture : si « API brut » vaut 2590000 et « en base » 25900,00,",
-          "  la conversion centimes → euros est juste. Si l'API rend 25900",
-          "  et la base 259,00, elle divise une fois de trop."]
+          "  Lecture : « API brut » et « en base » doivent être ÉGAUX.",
+          "  montantPrix est en EUROS (relevé en production le 25/08/2026) ;",
+          "  un écart d'un facteur 100 signale une conversion de trop.",
+          ""]
+
+    # L'allocation des performances passées vient d'un AUTRE endpoint,
+    # et rien ne garantit qu'elle suive la même unité. On la montre au
+    # lieu de la supposer.
+    try:
+        anciennes = conn.execute(
+            """SELECT allocation, count(*) AS n
+                 FROM performance_passee
+                WHERE allocation IS NOT NULL
+             GROUP BY 1 ORDER BY 2 DESC LIMIT 6""").fetchall()
+        L.append("-- Allocation des performances passees " + "-" * 20)
+        L.append("  (autre endpoint, unite a confirmer - valeurs les plus frequentes)")
+        for r in anciennes:
+            L.append(f"  {float(r['allocation']):>12,.2f} EUR   ({r['n']} lignes)")
+        L.append("  Si ces montants sont 100 fois trop petits, parse_performances")
+        L.append("  applique cents_to_eur a tort, comme le faisait montantPrix.")
+    except Exception as exc:  # noqa: BLE001
+        conn.rollback()
+        L.append(f"  (performances passees illisibles : {exc})")
     return "\n".join(L)
 
 

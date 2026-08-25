@@ -177,13 +177,29 @@ def _paris(n_courses=200, cote=5.0, rapport=None, taux=0.20, graine=11):
     return d
 
 
-def test_sans_rapport_reel_la_simulation_estime_comme_avant():
+def test_sans_rapport_reel_la_simulation_retombe_sur_l_estimation():
+    """
+    Le repli, quand aucun rapport n'a encore été collecté : retour
+    estimé à `cote × (1 − prélèvement)`. Le prélèvement n'est plus
+    supposé à 15 % mais MESURÉ à 15,6 % par `surcote()` — et le test
+    lit la constante plutôt que de recopier le chiffre, pour qu'une
+    remesure ne casse pas le test sans raison.
+    """
     d = _paris()
     sim = ev.simulation(d, seuils_valeur=(0.0,)).iloc[0]
     assert not sim["mesure"]
-    # retour = cote × (1 − 15 %) par gagnant
-    attendu = d["y_gagnant"].sum() * 5.0 * 0.85
+    attendu = d["y_gagnant"].sum() * 5.0 * (1 - ev.PRELEVEMENT_DEFAUT)
     assert sim["retour"] == pytest.approx(attendu, abs=0.02)
+
+
+def test_le_prelevement_par_defaut_est_celui_qui_a_ete_mesure():
+    """
+    15,6 %, et non les 15 % de départ. `surcote()` a mesuré une somme
+    de probabilités implicites de 1,1844 sur 2 249 courses, soit
+    1/(1−0,156). Laisser 15 % serait garder une supposition à côté
+    d'une mesure.
+    """
+    assert ev.PRELEVEMENT_DEFAUT == pytest.approx(1 - 1 / 1.1844, abs=0.002)
 
 
 def test_avec_rapport_reel_on_paie_ce_qui_a_ete_paye():
@@ -221,15 +237,16 @@ def test_une_course_sans_rapport_est_ecartee_pas_comptee_perdante():
 
 def test_le_roi_reel_differe_du_roi_estime_dans_le_bon_sens():
     """
-    Cote 5,00, rapport réellement payé 4,70. L'estimation payait
-    5,00 × 0,85 = 4,25, soit MOINS que la réalité : elle sous-estimait.
+    Cote 5,00, rapport réellement payé 4,70. L'estimation paie
+    5,00 × (1 − prélèvement), soit moins que la réalité.
     """
     d = _paris(rapport=4.70)
     estime = ev.simulation(d, seuils_valeur=(0.0,)).iloc[0]["roi_pct"]
     mesure = ev.simulation(d, seuils_valeur=(0.0,),
                            col_reel="rapport_reel").iloc[0]["roi_pct"]
     assert mesure > estime
-    assert (1 + mesure / 100) / (1 + estime / 100) == pytest.approx(4.70 / 4.25, rel=1e-3)
+    attendu = 4.70 / (5.0 * (1 - ev.PRELEVEMENT_DEFAUT))
+    assert (1 + mesure / 100) / (1 + estime / 100) == pytest.approx(attendu, rel=1e-3)
 
 
 def test_l_ecart_type_suit_la_mesure_utilisee():
