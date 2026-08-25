@@ -374,6 +374,16 @@ class Planificateur:
         if self.derniere_arrivee != jour and n.time() >= dtime(23, 30):
             self.arrivees(conn, jour)
             self.derniere_arrivee = jour
+            # Les rapports payés, une fois la journée close. C'est la
+            # seule mesure qui dise si la cote relevée est brute ou déjà
+            # nette de prélèvement — donc si la colonne Rentabilité se
+            # lit telle quelle ou doit être corrigée de ~18 %.
+            try:
+                collect.rafraichir_rapports(conn, self.client,
+                                            jour - timedelta(days=60), jour)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("rapports définitifs : %s", exc)
+                conn.rollback()
 
     def boucler(self) -> None:
         log.info("régime de croisière — vérification toutes les %d s", PERIODE_COTES)

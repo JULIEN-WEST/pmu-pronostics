@@ -494,6 +494,73 @@ def parse_cotes(p: dict, releve_le: datetime) -> list[dict]:
 
 
 # ---------------------------------------------------------------------
+# Rapports définitifs — ce qui a RÉELLEMENT été payé
+# ---------------------------------------------------------------------
+
+def parse_rapports_definitifs(payload) -> list[dict]:
+    """
+    Les rapports payés d'une course arrivée, une ligne par combinaison.
+
+    ⚠️ LA FORME DE CETTE RÉPONSE N'A PAS ÉTÉ OBSERVÉE EN DIRECT. Le
+    réseau du bac à sable ne joint pas l'API ; ce parseur accepte donc
+    les deux formes plausibles et se tait sur tout le reste. La commande
+    `python -m pmu.collect rapports --verifier` imprime la charge brute
+    depuis le conteneur : c'est elle qui tranche.
+
+    ⚠️ L'UNITÉ DU RAPPORT EST INCERTAINE. Selon les endpoints, le PMU
+    exprime un dividende en euros (4.5) ou en centimes (450) pour une
+    mise de base de 1 €. On N'ESSAIE PAS de deviner : on enregistre la
+    valeur brute ET sa mise de base, et c'est le diagnostic
+    (`evaluate.verifier_rapports`) qui déduit l'unité en comparant les
+    rapports aux cotes relevées. Convertir ici, à l'aveugle, rendrait le
+    diagnostic circulaire.
+    """
+    lignes = []
+
+    def _pousser(type_pari, mise_base, rap):
+        if not isinstance(rap, dict):
+            return
+        valeur = as_float(rap.get("dividendePourUnEuro"))
+        if valeur is None:
+            valeur = as_float(rap.get("dividende"))
+        if valeur is None:
+            valeur = as_float(rap.get("rapport"))
+        if valeur is None:
+            return
+        comb = rap.get("combinaison")
+        if isinstance(comb, (list, tuple)):
+            comb = "-".join(str(as_int(x)) for x in comb if as_int(x) is not None)
+        elif comb is not None:
+            comb = str(comb).strip()
+        if not comb:
+            comb = str(as_int(rap.get("numPmu")) or "").strip()
+        if not comb:
+            return
+        lignes.append({
+            "type_pari": str(type_pari or rap.get("typePari") or "?").strip(),
+            "combinaison": comb,
+            "rapport": valeur,
+            "mise_base": as_float(rap.get("miseBase")) or as_float(mise_base),
+            "nombre_gagnants": as_float(rap.get("nombreGagnants")),
+        })
+
+    blocs = payload if isinstance(payload, list) else (
+        (payload or {}).get("rapports") if isinstance(payload, dict) else None)
+    for bloc in blocs or []:
+        if not isinstance(bloc, dict):
+            continue
+        interne = bloc.get("rapports")
+        if isinstance(interne, list):
+            # Forme groupée : un bloc par type de pari.
+            for rap in interne:
+                _pousser(bloc.get("typePari"), bloc.get("miseBase"), rap)
+        else:
+            # Forme plate : un objet par combinaison.
+            _pousser(bloc.get("typePari"), bloc.get("miseBase"), bloc)
+    return lignes
+
+
+# ---------------------------------------------------------------------
 # Performances détaillées
 # ---------------------------------------------------------------------
 

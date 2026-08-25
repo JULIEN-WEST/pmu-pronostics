@@ -127,8 +127,13 @@ def collecte_course(
 def collecte_jour(conn, client: PmuClient, jour: date, *, avec_perfs: bool = True,
                   force: bool = False) -> dict:
     cle_jour = client.fmt_date(jour)
+    # Les compteurs sont initialisés pour que le journal de fin puisse
+    # les lire, mais l'ADDITION plus bas ne suppose PAS cette liste :
+    # `collecte_course` a gagné une clé (`expert`) en 1.3 et l'oubli ici
+    # a fait planter chaque tour de collecte sur un KeyError. Une source
+    # de vérité, pas deux à tenir synchronisées.
     total = {"reunions": 0, "courses": 0, "partants": 0, "cotes": 0,
-             "perfs": 0, "ignores": 0}
+             "perfs": 0, "ignores": 0, "expert": 0}
 
     try:
         # Le programme se recharge toujours : les arrivées et les statuts
@@ -179,7 +184,7 @@ def collecte_jour(conn, client: PmuClient, jour: date, *, avec_perfs: bool = Tru
                 course_id, c["ordre_arrivee"], avec_perfs=avec_perfs,
             )
             for k, v in s.items():
-                total[k] += v
+                total[k] = total.get(k, 0) + v
 
         conn.commit()
 
@@ -193,6 +198,85 @@ def collecte_jour(conn, client: PmuClient, jour: date, *, avec_perfs: bool = Tru
     return total
 
 
+SQL_COURSES_SANS_RAPPORT = """
+    SELECT c.course_id, c.num_reunion, c.num_ordre
+      FROM course c
+     WHERE c.date_reunion BETWEEN %s AND %s
+       AND c.ordre_arrivee IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM rapport_definitif r
+                        WHERE r.course_id = c.course_id)
+     ORDER BY c.date_reunion DESC, c.num_reunion, c.num_ordre
+     LIMIT %s
+"""
+
+
+def rafraichir_rapports(conn, client: PmuClient, depuis: date, jusqua: date,
+                        *, limite: int = 400) -> dict:
+    """
+    Récupère les rapports payés des courses déjà arrivées.
+
+    Séparé de la collecte du jour à dessein : les rapports ne sont
+    publiés qu'APRÈS l'arrivée, souvent avec quelques minutes de retard.
+    Les demander pendant la collecte du programme les manquerait
+    systématiquement pour la course qui vient de partir.
+    """
+    rows = conn.execute(SQL_COURSES_SANS_RAPPORT, (depuis, jusqua, limite)).fetchall()
+    out = {"courses": 0, "lignes": 0, "vides": 0}
+    for course_id, num_r, num_c in rows:
+        jour = conn.execute(
+            "SELECT date_reunion FROM course WHERE course_id = %s", (course_id,)
+        ).fetchone()[0]
+        try:
+            charge = client.rapports_definitifs(jour, num_r, num_c, use_cache=False)
+        except (PmuNotFound, PmuError):
+            out["vides"] += 1
+            continue
+        except Exception as exc:  # noqa: BLE001
+            log.warning("rapports R%sC%s du %s : %s", num_r, num_c, jour, exc)
+            out["vides"] += 1
+            continue
+        lignes = nz.parse_rapports_definitifs(charge)
+        if not lignes:
+            out["vides"] += 1
+            continue
+        try:
+            with conn.transaction():
+                out["lignes"] += db.insert_rapports_definitifs(conn, course_id, lignes)
+            out["courses"] += 1
+        except Exception as exc:  # noqa: BLE001
+            log.warning("rapports de la course %s ignorés : %s", course_id, exc)
+    conn.commit()
+    log.info("rapports définitifs : %d courses, %d lignes, %d sans rapport",
+             out["courses"], out["lignes"], out["vides"])
+    return out
+
+
+def inspecter_rapports(client: PmuClient, jour: date, num_r: int, num_c: int) -> str:
+    """
+    Imprime la charge BRUTE d'une course arrivée, puis ce que le parseur
+    en tire.
+
+    Raison d'être : la forme de cette réponse n'a pas pu être observée
+    depuis l'environnement de développement. Plutôt que de deviner en
+    silence et d'enregistrer des zéros, on donne de quoi trancher en
+    trente secondes depuis le conteneur.
+    """
+    import json
+    charge = client.rapports_definitifs(jour, num_r, num_c, use_cache=False)
+    lignes = nz.parse_rapports_definitifs(charge)
+    brut = json.dumps(charge, ensure_ascii=False, indent=1)
+    L = ["── Charge brute " + "─" * 44, brut[:3000],
+         "", "── Ce que le parseur en tire " + "─" * 31,
+         f"  {len(lignes)} ligne(s)"]
+    for l in lignes[:12]:
+        L.append(f"  {l['type_pari']:<22} {l['combinaison']:<10} "
+                 f"rapport={l['rapport']} mise_base={l['mise_base']}")
+    if not lignes:
+        L.append("  AUCUNE — la forme attendue ne correspond pas.")
+        L.append("  Copier la charge brute ci-dessus et la transmettre.")
+    return "\n".join(L)
+
+
 def backfill(conn, client: PmuClient, depuis: date, jusqua: date,
              *, avec_perfs: bool = True, force: bool = False) -> dict:
     """Remonte le temps du plus récent au plus ancien."""
@@ -204,7 +288,7 @@ def backfill(conn, client: PmuClient, depuis: date, jusqua: date,
         else:
             t = collecte_jour(conn, client, jour, avec_perfs=avec_perfs, force=force)
             for k, v in t.items():
-                cumul[k] += v
+                cumul[k] = cumul.get(k, 0) + v
         cumul["jours"] += 1
         jour -= timedelta(days=1)
     db.link_genealogie(conn)
@@ -258,7 +342,7 @@ def live_cotes(conn, client: PmuClient, jour: date | None = None,
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Collecte PMU")
-    ap.add_argument("mode", choices=["jour", "backfill", "live", "init"])
+    ap.add_argument("mode", choices=["jour", "backfill", "live", "init", "rapports"])
     ap.add_argument("--date", type=lambda s: date.fromisoformat(s))
     ap.add_argument("--depuis", type=lambda s: date.fromisoformat(s))
     ap.add_argument("--jusqua", type=lambda s: date.fromisoformat(s))
@@ -267,6 +351,10 @@ def main() -> None:
     ap.add_argument("--sans-perfs", action="store_true")
     ap.add_argument("--force", action="store_true")
     ap.add_argument("-v", "--verbose", action="store_true")
+    # `rapports --verifier R1 C1` imprime la charge brute d'une course
+    # arrivée : la forme de cette réponse n'a pas pu être observée
+    # depuis l'environnement de développement.
+    ap.add_argument("--verifier", nargs=2, metavar=("R", "C"), type=int)
     args = ap.parse_args()
 
     logging.basicConfig(
@@ -303,6 +391,16 @@ def main() -> None:
             log.info("backfill terminé : %s", cumul)
         elif args.mode == "live":
             live_cotes(conn, client, args.date)
+        elif args.mode == "rapports":
+            if args.verifier:
+                jour = args.date or (date.today() - timedelta(days=1))
+                print(inspecter_rapports(client, jour, *args.verifier))
+                return
+            jusqua = args.jusqua or date.today()
+            depuis = args.depuis or (jusqua - timedelta(days=60))
+            rafraichir_rapports(conn, client, depuis, jusqua)
+            from . import evaluate as ev
+            print(ev.afficher_rapports(ev.verifier_rapports(conn, depuis, jusqua)))
 
 
 if __name__ == "__main__":

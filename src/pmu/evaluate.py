@@ -657,6 +657,147 @@ def echelle_confiance(df: pd.DataFrame, *, cible="y_gagnant", n=5) -> dict:
     return {"seuils": bornes, "niveaux": niveaux}
 
 
+# ---------------------------------------------------------------------
+# Le prélèvement : la cote relevée est-elle brute ou nette ?
+# ---------------------------------------------------------------------
+#
+# LA QUESTION, ET POURQUOI ELLE DÉCIDE DU PROJET
+#
+# La simulation de rentabilité multiplie la cote par (1 − prélèvement).
+# Ça n'est correct QUE si `mkt_cote` est un rapport BRUT. Or dans un
+# pari mutuel, le rapport affiché est en général déjà NET : le
+# prélèvement est retiré de la masse avant répartition. Si c'est le cas
+# ici, tous les ROI sont sous-estimés d'environ 18 %, et la conclusion
+# « le modèle n'est pas rentable » repose sur une erreur d'unité.
+#
+# Le juge : ce qui a été RÉELLEMENT payé. Pour un cheval gagnant, le
+# rapport définitif du SIMPLE GAGNANT est, par définition, la somme
+# perçue pour une mise de 1 €. Le rapport de ce montant à `mkt_cote`
+# répond à la question sans modèle et sans hypothèse :
+#
+#     ratio ≈ 1     → la cote relevée EST le rapport payé.
+#                     Elle est donc DÉJÀ nette : appliquer (1 − 15 %)
+#                     la ponctionne une seconde fois.
+#     ratio ≈ 0,85  → la cote est brute, le prélèvement est à appliquer.
+#                     La simulation actuelle est juste.
+#     ratio ≈ 100   → le rapport est en centimes. Question d'unité, pas
+#                     d'économie : à corriger avant toute lecture.
+#
+# On mesure la MÉDIANE, pas la moyenne : quelques rapports à 300 € sur
+# des outsiders écraseraient toute moyenne.
+
+RATIO_TOLERANCE = 0.04
+
+# La cote de référence est le DERNIER relevé du Simple Gagnant avant le
+# départ — la même que celle qui alimente `mkt_cote` dans les features.
+# La vue v_cote_finale fait exactement ça ; on ne la réécrit pas.
+SQL_RAPPORTS = """
+    SELECT c.course_id,
+           p.num_pmu,
+           cf.rapport   AS cote,
+           r.rapport    AS rapport,
+           r.mise_base  AS mise_base
+      FROM course c
+      JOIN partant p  ON p.course_id = c.course_id AND p.ordre_arrivee = 1
+      JOIN v_cote_finale cf
+        ON cf.course_id = p.course_id AND cf.num_pmu = p.num_pmu
+       AND cf.type_pari IN ('SIMPLE_GAGNANT', 'E_SIMPLE_GAGNANT')
+      JOIN rapport_definitif r
+        ON r.course_id = c.course_id
+       AND r.combinaison = p.num_pmu::text
+       AND r.type_pari IN ('SIMPLE_GAGNANT', 'E_SIMPLE_GAGNANT')
+     WHERE c.date_reunion BETWEEN %s AND %s
+       AND r.rapport IS NOT NULL
+"""
+
+
+def verifier_rapports(conn, depuis, jusqua, *, prelevement=PRELEVEMENT_DEFAUT) -> dict:
+    """
+    Compare la cote relevée au rapport réellement payé, sur les gagnants.
+
+    Ne renvoie JAMAIS de conclusion quand l'échantillon est trop mince :
+    c'est précisément le genre de question qu'on n'a le droit de
+    trancher qu'une fois.
+    """
+    try:
+        rows = conn.execute(SQL_RAPPORTS, (depuis, jusqua)).fetchall()
+    except Exception as exc:  # noqa: BLE001
+        conn.rollback()
+        return {"n": 0, "verdict": "indisponible", "message": str(exc)}
+
+    d = pd.DataFrame(rows, columns=["course_id", "num_pmu", "cote", "rapport", "mise_base"])
+    d = d.apply(pd.to_numeric, errors="coerce").dropna(subset=["cote", "rapport"])
+    d = d[(d["cote"] > 1) & (d["rapport"] > 0)]
+    if len(d) < 30:
+        return {"n": int(len(d)), "verdict": "insuffisant",
+                "message": ("il faut au moins 30 gagnants avec un rapport "
+                            "connu ; lancer d'abord `python -m pmu.collect "
+                            "rapports`")}
+
+    # Une mise de base de 2 € double mécaniquement le rapport.
+    base = d["mise_base"].where(d["mise_base"].gt(0), 1.0).fillna(1.0)
+    d["ratio"] = (d["rapport"] / base) / d["cote"]
+    med = float(d["ratio"].median())
+
+    if abs(med - 1.0) <= RATIO_TOLERANCE:
+        verdict = "cote_nette"
+        message = ("La cote relevée EST le rapport payé : elle est déjà nette "
+                   "de prélèvement. La simulation le retire une seconde fois, "
+                   "donc elle SOUS-ESTIME le ROI.")
+        correction = 1.0 / (1.0 - prelevement)
+    elif abs(med - (1.0 - prelevement)) <= RATIO_TOLERANCE:
+        verdict = "cote_brute"
+        message = ("La cote relevée est brute : le prélèvement doit bien être "
+                   "appliqué. La simulation de rentabilité est juste.")
+        correction = 1.0
+    elif med > 20:
+        verdict = "unite"
+        message = (f"Le rapport vaut {med:.0f} fois la cote : il est presque "
+                   "certainement exprimé en centimes. À corriger avant toute "
+                   "lecture économique.")
+        correction = None
+    else:
+        verdict = "inattendu"
+        message = (f"Ratio médian {med:.3f} — ni 1 (cote nette), ni "
+                   f"{1 - prelevement:.2f} (cote brute). Ne rien conclure : "
+                   "regarder d'abord quelques lignes à la main.")
+        correction = None
+
+    return {
+        "n": int(len(d)),
+        "courses": int(d["course_id"].nunique()),
+        "ratio_median": round(med, 4),
+        "ratio_q1": round(float(d["ratio"].quantile(0.25)), 4),
+        "ratio_q3": round(float(d["ratio"].quantile(0.75)), 4),
+        "cote_mediane": round(float(d["cote"].median()), 2),
+        "rapport_median": round(float((d["rapport"] / base).median()), 2),
+        "verdict": verdict,
+        "message": message,
+        # Facteur à appliquer aux ROI déjà publiés pour les corriger.
+        "correction_roi": None if correction is None else round(correction, 4),
+    }
+
+
+def afficher_rapports(v: dict) -> str:
+    L = ["── Cote relevée contre rapport payé " + "─" * 24]
+    if v.get("verdict") in (None, "indisponible", "insuffisant"):
+        L.append(f"  {v.get('message', 'rien à mesurer')}")
+        L.append(f"  gagnants exploitables : {v.get('n', 0)}")
+        return "\n".join(L)
+    L += [
+        f"  gagnants comparés        {v['n']} sur {v['courses']} courses",
+        f"  cote médiane             {v['cote_mediane']}",
+        f"  rapport payé médian      {v['rapport_median']}",
+        f"  ratio rapport / cote     {v['ratio_median']}"
+        f"   (Q1 {v['ratio_q1']} — Q3 {v['ratio_q3']})",
+        "",
+        "  " + v["message"],
+    ]
+    if v.get("correction_roi") and v["correction_roi"] != 1.0:
+        L.append(f"  → multiplier (1 + ROI) par {v['correction_roi']} pour corriger")
+    return "\n".join(L)
+
+
 def note_confiance(ecart: float | None, seuils: list) -> int:
     """Écart 1ᵉʳ/2ᵉ → note de 1 à 5, selon les seuils mesurés."""
     if ecart is None or not seuils:

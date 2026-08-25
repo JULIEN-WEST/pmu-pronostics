@@ -14,6 +14,7 @@ Endpoints :
     GET /vue                       page HTML visuelle, à mettre en iframe
     GET /rapport                   rapport du dernier entraînement (texte)
     GET /bilan?format=texte        ce que les pronostics publiés ont donné
+    GET /rapports                  cote relevée contre rapport payé
     GET /ha/resume                 charge utile compacte pour Home Assistant
     GET /ha/prochaine              la course à venir, formatée pour l'affichage
 
@@ -174,6 +175,32 @@ def bilan(
     if format.lower().startswith("t"):
         return PlainTextResponse(ev.afficher_bilan(b))
     return b
+
+
+@app.get("/rapports")
+def rapports_payes(
+    depuis: str | None = Query(None, description="AAAA-MM-JJ"),
+    jusqua: str | None = Query(None, description="AAAA-MM-JJ"),
+    format: str = Query("texte", description="texte | json"),
+):
+    """
+    La cote relevée est-elle brute ou déjà nette de prélèvement ?
+
+    Question d'unité, pas d'opinion — et elle décide de la lecture de
+    toute la colonne Rentabilité. Comparée sur les chevaux GAGNANTS,
+    pour lesquels le rapport payé est mesuré, pas estimé.
+    """
+    from . import evaluate as ev
+
+    d = date.fromisoformat(depuis) if depuis else date(2000, 1, 1)
+    j = _jour(jusqua)
+    with db.connect() as conn:
+        if not _table_existe(conn, "rapport_definitif"):
+            raise HTTPException(503, "table rapport_definitif absente")
+        v = ev.verifier_rapports(conn, d, j)
+    if format.lower().startswith("t"):
+        return PlainTextResponse(ev.afficher_rapports(v))
+    return v
 
 
 # ---------------------------------------------------------------------

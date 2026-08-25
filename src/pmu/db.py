@@ -497,6 +497,33 @@ def propager_arrivees(conn, jour=None) -> int:
 
 
 
+def insert_rapports_definitifs(conn, course_id: int, lignes: list[dict]) -> int:
+    """
+    Ce qui a été réellement payé. Idempotent.
+
+    La table existait depuis le premier schéma et n'a JAMAIS été
+    remplie : aucun code n'appelait `client.rapports_definitifs`. C'est
+    la première écriture dedans.
+    """
+    if not lignes:
+        return 0
+    conn.cursor().executemany(
+        """
+        INSERT INTO rapport_definitif (course_id, type_pari, combinaison,
+                                       rapport, mise_base, nombre_gagnants)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        ON CONFLICT (course_id, type_pari, combinaison) DO UPDATE SET
+            rapport         = COALESCE(EXCLUDED.rapport, rapport_definitif.rapport),
+            mise_base       = COALESCE(EXCLUDED.mise_base, rapport_definitif.mise_base),
+            nombre_gagnants = COALESCE(EXCLUDED.nombre_gagnants,
+                                       rapport_definitif.nombre_gagnants)
+        """,
+        [(course_id, l["type_pari"], l["combinaison"], l.get("rapport"),
+          l.get("mise_base"), l.get("nombre_gagnants")) for l in lignes],
+    )
+    return len(lignes)
+
+
 def insert_pronostics_expert(conn, course_id: int, lignes: list[dict]) -> int:
     """Avis de l'analyste pour une course. Idempotent."""
     if not lignes:
