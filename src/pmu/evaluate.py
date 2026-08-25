@@ -734,9 +734,12 @@ def verifier_rapports(conn, depuis, jusqua, *, prelevement=PRELEVEMENT_DEFAUT) -
                             "connu ; lancer d'abord `python -m pmu.collect "
                             "rapports`")}
 
-    # Une mise de base de 2 € double mécaniquement le rapport.
-    base = d["mise_base"].where(d["mise_base"].gt(0), 1.0).fillna(1.0)
-    d["ratio"] = (d["rapport"] / base) / d["cote"]
+    # `parse_rapports_definitifs` rend DÉJÀ des euros perçus pour 1 €
+    # misé (le champ `dividendePourUnEuro`, converti de centimes). Ne
+    # PAS rediviser par la mise de base : elle ne sert plus qu'à
+    # documenter la ligne, et diviser une seconde fois par 2 ferait
+    # passer une cote nette pour une cote brute.
+    d["ratio"] = d["rapport"] / d["cote"]
     med = float(d["ratio"].median())
 
     if abs(med - 1.0) <= RATIO_TOLERANCE:
@@ -770,7 +773,7 @@ def verifier_rapports(conn, depuis, jusqua, *, prelevement=PRELEVEMENT_DEFAUT) -
         "ratio_q1": round(float(d["ratio"].quantile(0.25)), 4),
         "ratio_q3": round(float(d["ratio"].quantile(0.75)), 4),
         "cote_mediane": round(float(d["cote"].median()), 2),
-        "rapport_median": round(float((d["rapport"] / base).median()), 2),
+        "rapport_median": round(float(d["rapport"].median()), 2),
         "verdict": verdict,
         "message": message,
         # Facteur à appliquer aux ROI déjà publiés pour les corriger.

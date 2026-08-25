@@ -501,32 +501,53 @@ def parse_rapports_definitifs(payload) -> list[dict]:
     """
     Les rapports payés d'une course arrivée, une ligne par combinaison.
 
-    ⚠️ LA FORME DE CETTE RÉPONSE N'A PAS ÉTÉ OBSERVÉE EN DIRECT. Le
-    réseau du bac à sable ne joint pas l'API ; ce parseur accepte donc
-    les deux formes plausibles et se tait sur tout le reste. La commande
-    `python -m pmu.collect rapports --verifier` imprime la charge brute
-    depuis le conteneur : c'est elle qui tranche.
+    FORME RÉELLE, relevée le 25/08/2026 sur R1C1 du 24/08 :
 
-    ⚠️ L'UNITÉ DU RAPPORT EST INCERTAINE. Selon les endpoints, le PMU
-    exprime un dividende en euros (4.5) ou en centimes (450) pour une
-    mise de base de 1 €. On N'ESSAIE PAS de deviner : on enregistre la
-    valeur brute ET sa mise de base, et c'est le diagnostic
-    (`evaluate.verifier_rapports`) qui déduit l'unité en comparant les
-    rapports aux cotes relevées. Convertir ici, à l'aveugle, rendrait le
-    diagnostic circulaire.
+        {"typePari": "SIMPLE_GAGNANT", "miseBase": 200,
+         "rapports": [{"combinaison": "9", "dividende": 190,
+                       "dividendePourUnEuro": 190,
+                       "dividendePourUneMiseDeBase": 380,
+                       "dividendeUnite": "PourUnEuro",
+                       "nombreGagnants": 29090.93}]}
+
+    DEUX PIÈGES, tous deux confirmés par cette charge.
+
+    1. TOUT EST EN CENTIMES. `miseBase` 200 = 2,00 € ; `dividende` 190
+       = 1,90 €. La cohérence interne le prouve : 190 x 2 = 380, et un
+       cheval a 29 090 tickets gagnants n'est pas a 190 contre 1. On
+       convertit donc en euros ici — ce n'est plus une hypothese.
+
+    2. TROIS CHAMPS DE DIVIDENDE COEXISTENT, et ils ne disent pas la
+       meme chose. Sur un 2sur4 a 3 EUR de mise de base :
+       `dividende` = 570 (pour la mise de base), `dividendePourUnEuro`
+       = 190. Prendre `dividende` sans regarder `dividendeUnite`
+       gonflerait le rapport du montant de la mise de base — ici d'un
+       facteur trois. On privilegie toujours `dividendePourUnEuro`.
+
+    La valeur rendue est donc TOUJOURS en euros percus pour 1 EUR mise,
+    directement comparable a une cote decimale.
     """
     lignes = []
 
-    def _pousser(type_pari, mise_base, rap):
+    def _pousser(type_pari, mise_base_c, rap):
         if not isinstance(rap, dict):
             return
-        valeur = as_float(rap.get("dividendePourUnEuro"))
-        if valeur is None:
-            valeur = as_float(rap.get("dividende"))
-        if valeur is None:
-            valeur = as_float(rap.get("rapport"))
-        if valeur is None:
+        base_c = as_float(rap.get("miseBase")) or as_float(mise_base_c)
+        # Ordre de preference : le champ deja ramene a 1 EUR, sinon celui
+        # qu'on sait convertir, sinon rien.
+        centimes = as_float(rap.get("dividendePourUnEuro"))
+        if centimes is None:
+            brut = as_float(rap.get("dividende"))
+            unite = str(rap.get("dividendeUnite") or "")
+            if brut is not None and unite == "PourUneMiseDeBase" and base_c:
+                centimes = brut / (base_c / 100.0)
+            else:
+                centimes = brut
+        if centimes is None:
+            centimes = as_float(rap.get("rapport"))
+        if centimes is None or centimes <= 0:
             return
+
         comb = rap.get("combinaison")
         if isinstance(comb, (list, tuple)):
             comb = "-".join(str(as_int(x)) for x in comb if as_int(x) is not None)
@@ -536,11 +557,13 @@ def parse_rapports_definitifs(payload) -> list[dict]:
             comb = str(as_int(rap.get("numPmu")) or "").strip()
         if not comb:
             return
+
         lignes.append({
             "type_pari": str(type_pari or rap.get("typePari") or "?").strip(),
             "combinaison": comb,
-            "rapport": valeur,
-            "mise_base": as_float(rap.get("miseBase")) or as_float(mise_base),
+            # En EUROS percus pour 1 EUR mise.
+            "rapport": round(centimes / 100.0, 4),
+            "mise_base": None if base_c is None else round(base_c / 100.0, 2),
             "nombre_gagnants": as_float(rap.get("nombreGagnants")),
         })
 
@@ -551,11 +574,9 @@ def parse_rapports_definitifs(payload) -> list[dict]:
             continue
         interne = bloc.get("rapports")
         if isinstance(interne, list):
-            # Forme groupée : un bloc par type de pari.
             for rap in interne:
                 _pousser(bloc.get("typePari"), bloc.get("miseBase"), rap)
         else:
-            # Forme plate : un objet par combinaison.
             _pousser(bloc.get("typePari"), bloc.get("miseBase"), bloc)
     return lignes
 

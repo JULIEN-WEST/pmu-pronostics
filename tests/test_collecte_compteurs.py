@@ -180,3 +180,100 @@ def test_le_backfill_survit_a_une_nouvelle_statistique(monkeypatch, sans_base):
     cumul = collect.backfill(FausseConn(), FauxClient(),
                              depuis=JOUR, jusqua=JOUR)
     assert cumul["inedit"] == 10
+
+
+# ---------------------------------------------------------------------
+# 3. Le piège des curseurs `dict_row`
+# ---------------------------------------------------------------------
+#
+# `db.connect()` ouvre ses curseurs en `dict_row`. Une ligne est donc un
+# dictionnaire, et la déballer comme un tuple —
+#
+#     for course_id, num_r, num_c in rows:
+#
+# — itère sur les NOMS DE COLONNES. La requête suivante reçoit alors la
+# chaîne « course_id » là où PostgreSQL attend un bigint :
+#
+#     invalid input syntax for type bigint: "course_id"
+#
+# Le piège est d'autant plus vicieux qu'il ne se voit qu'à l'exécution,
+# sur une vraie connexion — un dictionnaire à trois clés se déballe
+# parfaitement en trois variables.
+
+class ConnDictRow:
+    """Une connexion qui rend des dictionnaires, comme la vraie."""
+
+    def __init__(self, lignes):
+        self.lignes = lignes
+        self.vues = []
+
+    def execute(self, sql, params=None):
+        self.vues.append(params)
+        self._r = self.lignes
+        return self
+
+    def fetchall(self):
+        return self._r
+
+    def commit(self):
+        pass
+
+    def rollback(self):
+        pass
+
+    def transaction(self):
+        class _T:
+            def __enter__(self_): return self_
+            def __exit__(self_, *a): return False
+        return _T()
+
+
+class ClientRapports:
+    def fmt_date(self, jour):
+        return jour.strftime("%d%m%Y")
+
+    def __init__(self):
+        self.demandes = []
+
+    def rapports_definitifs(self, jour, r, c, use_cache=False):
+        self.demandes.append((jour, r, c))
+        return [{"typePari": "SIMPLE_GAGNANT", "miseBase": 200,
+                 "rapports": [{"combinaison": "9", "dividendePourUnEuro": 190}]}]
+
+
+def test_les_lignes_sont_lues_par_cle_pas_par_position(monkeypatch):
+    """
+    Le bug tel qu'il s'est produit : `rafraichir_rapports` déballait ses
+    lignes comme des tuples et envoyait « course_id » à PostgreSQL.
+    """
+    inserees = {}
+
+    def _insert(conn, course_id, lignes):
+        inserees[course_id] = lignes
+        return len(lignes)
+
+    monkeypatch.setattr(collect.db, "insert_rapports_definitifs", _insert)
+    conn = ConnDictRow([
+        {"course_id": 4242, "num_reunion": 1, "num_ordre": 3,
+         "date_reunion": JOUR},
+    ])
+    client = ClientRapports()
+    out = collect.rafraichir_rapports(conn, client, JOUR, JOUR)
+
+    assert out["courses"] == 1 and out["lignes"] == 1
+    assert 4242 in inserees, "la course a été identifiée par sa clé, pas par sa position"
+    assert client.demandes == [(JOUR, 1, 3)]
+    assert inserees[4242][0]["rapport"] == 1.90
+
+
+def test_une_course_sans_rapport_est_comptee_sans_planter(monkeypatch):
+    class Muet(ClientRapports):
+        def rapports_definitifs(self, jour, r, c, use_cache=False):
+            raise collect.PmuNotFound("404")
+
+    monkeypatch.setattr(collect.db, "insert_rapports_definitifs",
+                        lambda *a, **k: 0)
+    conn = ConnDictRow([{"course_id": 1, "num_reunion": 1, "num_ordre": 1,
+                         "date_reunion": JOUR}])
+    out = collect.rafraichir_rapports(conn, Muet(), JOUR, JOUR)
+    assert out == {"courses": 0, "lignes": 0, "vides": 1}

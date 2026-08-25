@@ -199,7 +199,7 @@ def collecte_jour(conn, client: PmuClient, jour: date, *, avec_perfs: bool = Tru
 
 
 SQL_COURSES_SANS_RAPPORT = """
-    SELECT c.course_id, c.num_reunion, c.num_ordre
+    SELECT c.course_id, c.num_reunion, c.num_ordre, c.date_reunion
       FROM course c
      WHERE c.date_reunion BETWEEN %s AND %s
        AND c.ordre_arrivee IS NOT NULL
@@ -222,10 +222,14 @@ def rafraichir_rapports(conn, client: PmuClient, depuis: date, jusqua: date,
     """
     rows = conn.execute(SQL_COURSES_SANS_RAPPORT, (depuis, jusqua, limite)).fetchall()
     out = {"courses": 0, "lignes": 0, "vides": 0}
-    for course_id, num_r, num_c in rows:
-        jour = conn.execute(
-            "SELECT date_reunion FROM course WHERE course_id = %s", (course_id,)
-        ).fetchone()[0]
+    # ⚠️ `db.connect()` ouvre des curseurs en `dict_row`. Déballer une
+    # ligne comme un tuple (`for a, b, c in rows`) itère alors sur les
+    # NOMS de colonnes, et la requête suivante reçoit la chaîne
+    # « course_id » à la place d'un entier. On accède par clé, toujours.
+    for r in rows:
+        course_id = r["course_id"]
+        num_r, num_c = r["num_reunion"], r["num_ordre"]
+        jour = r["date_reunion"]
         try:
             charge = client.rapports_definitifs(jour, num_r, num_c, use_cache=False)
         except (PmuNotFound, PmuError):
