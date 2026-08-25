@@ -10,6 +10,17 @@
 # n'ajoute que ce que MQTT ne fournit pas — les commandes et l'alerte.
 #
 # Remplacer 192.168.1.85 par l'adresse de l'hôte Docker.
+#
+# ── 2026.9 : `target` disparaît de telegram_bot.send_message ────────
+# Home Assistant remonte une « correction » sur chaque automatisation
+# qui l'emploie encore. Les trois envois Telegram ci-dessous utilisent
+# donc `chat_id`, son remplaçant direct : même valeur, même
+# destinataire, et rien à créer au préalable.
+#
+# L'autre remplaçant proposé, `entity_id`, vise les entités de
+# notification du bot Telegram. Il est plus propre sur le papier mais
+# suppose que ces entités existent et soient nommées ; `chat_id` ne
+# suppose rien.
 
 rest_command:
   pmu_recalculer:
@@ -108,7 +119,7 @@ automation:
     actions:
       - action: telegram_bot.send_message
         data:
-          target: 7136393185
+          chat_id: 7136393185
           title: "*🐎 Pile PMU hors service*"
           message: >
             Les pronostics ne sont plus à jour depuis
@@ -137,7 +148,7 @@ automation:
     actions:
       - action: telegram_bot.send_message
         data:
-          target: 7136393185
+          chat_id: 7136393185
           title: "*🐎 Pronostics du jour*"
           message: >
             {% for c in state_attr('sensor.pmu_courses', 'programme') or [] -%}
@@ -175,7 +186,7 @@ automation:
     actions:
       - action: telegram_bot.send_message
         data:
-          target: 7136393185
+          chat_id: 7136393185
           title: "*🐎 Course à forte confiance*"
           message: >
             {% set p = state_attr('sensor.pmu_courses', 'prochaine') %}

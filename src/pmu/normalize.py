@@ -562,3 +562,80 @@ def parse_performances(bloc: dict, id_cheval: str | None = None) -> list[dict]:
             }
         )
     return [l for l in lignes if l["date_course"] is not None]
+
+# ---------------------------------------------------------------------
+# Avis d'expert (DATAHIPPIQUE, via l'API PMU)
+# ---------------------------------------------------------------------
+
+_COTE_FRACTION = re.compile(r"^\s*(\d+(?:[.,]\d+)?)\s*/\s*(\d+(?:[.,]\d+)?)\s*$")
+
+
+def parse_cote_probable(valeur: Any) -> float | None:
+    """
+    « 3/1 » → 4,0 en cote décimale.
+
+    La cote probable est écrite en fractionnaire : « 3/1 » veut dire
+    trois contre un, soit quatre fois la mise. Confondre les deux
+    écritures fausserait la probabilité implicite de 33 % au lieu de
+    25 % — une erreur silencieuse, et systématique.
+    """
+    if valeur is None:
+        return None
+    if isinstance(valeur, (int, float)) and not isinstance(valeur, bool):
+        d = float(valeur)
+        return d if d > 1 else None
+    m = _COTE_FRACTION.match(str(valeur))
+    if m:
+        num = float(m.group(1).replace(",", "."))
+        den = float(m.group(2).replace(",", "."))
+        if den <= 0:
+            return None
+        return round(num / den + 1.0, 3)
+    try:
+        d = float(str(valeur).replace(",", "."))
+    except ValueError:
+        return None
+    return d if d > 1 else None
+
+
+def parse_pronostic_expert(selection: Any, cribles: Any = None) -> list[dict]:
+    """
+    Classement de l'analyste, une ligne par partant.
+
+    `cribles` est facultatif : c'est la sélection resserrée, publiée à
+    part. Un cheval retenu là est un cheval que l'analyste défend
+    explicitement, ce qui n'est pas la même chose qu'être bien classé.
+    """
+    if isinstance(selection, dict):
+        source = selection.get("source") or selection.get("signature")
+        lignes = selection.get("selection")
+    else:
+        source, lignes = None, selection
+    if not isinstance(lignes, list):
+        return []
+
+    retenus: dict[int, str | None] = {}
+    if isinstance(cribles, dict):
+        for c in cribles.get("cribles") or []:
+            if isinstance(c, dict):
+                n = as_int(c.get("numPmu"))
+                if n is not None:
+                    retenus[n] = as_texte(c.get("commentaire"))
+
+    out = []
+    for item in lignes:
+        if not isinstance(item, dict):
+            continue
+        num = as_int(item.get("num_partant") or item.get("numPmu"))
+        if num is None:
+            continue
+        out.append({
+            "num_pmu": num,
+            "rang_expert": as_int(item.get("rang")),
+            "cote_probable": parse_cote_probable(item.get("cote_prob")),
+            "est_crible": num in retenus,
+            "commentaire_expert": retenus.get(num),
+            "source_expert": source,
+        })
+    return out
+

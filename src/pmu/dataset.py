@@ -128,6 +128,10 @@ SELECT
     mt.temperature AS meteo_temperature, mt.pluie_jour AS meteo_pluie_jour,
     mt.pluie_24h   AS meteo_pluie_24h,  mt.vent_max    AS meteo_vent,
     mt.humidite    AS meteo_humidite,
+    -- Avis de l'analyste : classement complet et cote probable, publiés
+    -- avant la course. C'est un AVIS, corrélé au marché : il est traité
+    -- comme tel dans features.py et exclu du modèle `sans_marche`.
+    px.rang_expert, px.cote_probable, px.est_crible,
     'direct'::text     AS source
 FROM partant p
 JOIN course     c  ON c.course_id = p.course_id
@@ -142,6 +146,8 @@ LEFT JOIN cote_serie cs ON cs.course_id = p.course_id AND cs.num_pmu = p.num_pmu
 LEFT JOIN cote_avant ca ON ca.course_id = p.course_id AND ca.num_pmu = p.num_pmu
 LEFT JOIN meteo      mt ON mt.hippodrome_code = r.hippodrome_code
                        AND mt.date_course = c.date_reunion
+LEFT JOIN pronostic_expert px ON px.course_id = p.course_id
+                             AND px.num_pmu = p.num_pmu
 WHERE c.date_reunion BETWEEN %(depuis)s AND %(jusqua)s
 """
 
@@ -226,6 +232,9 @@ SELECT
     NULL::numeric      AS meteo_pluie_24h,
     NULL::numeric      AS meteo_vent,
     NULL::numeric      AS meteo_humidite,
+    NULL::smallint     AS rang_expert,
+    NULL::numeric      AS cote_probable,
+    NULL::boolean      AS est_crible,
     'importe'::text    AS source
 FROM performance_passee pp
 LEFT JOIN cheval ch ON ch.id_cheval = pp.id_cheval

@@ -180,6 +180,26 @@ class PmuClient:
             f"programme/{self.fmt_date(d)}/R{r}/C{c}/citations", use_cache=use_cache
         )
 
+    def pronostics_expert(self, d: date, r: int, c: int, *, use_cache: bool = True) -> Any:
+        """
+        Classement complet des partants par un analyste (DATAHIPPIQUE),
+        avec sa cote probable. Disponible AVANT la course, et rétroactif
+        sur l'historique — donc rattrapable.
+
+        C'est le seul avis expert gratuit et structuré du projet : ni la
+        généalogie IFCE (payante) ni LeTrot (pas d'API) ne l'étaient.
+        """
+        return self.get(
+            f"programme/{self.fmt_date(d)}/R{r}/C{c}/pronostics", use_cache=use_cache
+        )
+
+    def cribles_expert(self, d: date, r: int, c: int, *, use_cache: bool = True) -> Any:
+        """Sélection resserrée du même analyste, avec un commentaire par cheval."""
+        return self.get(
+            f"programme/{self.fmt_date(d)}/R{r}/C{c}/pronostics-detailles",
+            use_cache=use_cache,
+        )
+
     # -- robustesse ---------------------------------------------------
 
     def detect_client_version(self, probe_date: date, candidates: range | None = None) -> int:

@@ -49,7 +49,7 @@ def collecte_course(
 ) -> dict:
     """Partants + cotes + performances passées d'une course. Renvoie un compte."""
     cle = f"{client.fmt_date(jour)}/R{num_r}/C{num_c}"
-    stats = {"partants": 0, "cotes": 0, "perfs": 0, "ignores": 0}
+    stats = {"partants": 0, "cotes": 0, "perfs": 0, "ignores": 0, "expert": 0}
     releve_le = datetime.now(timezone.utc)
 
     try:
@@ -60,6 +60,18 @@ def collecte_course(
     except PmuError as exc:
         db.journal(conn, "participants", cle, "ERREUR", None, str(exc))
         return stats
+
+    # Avis de l'analyste : un classement complet, publié avant la course
+    # et rétroactif. Jamais bloquant — c'est un bonus, pas un socle.
+    try:
+        sel = client.pronostics_expert(jour, num_r, num_c)
+        cribles = client.cribles_expert(jour, num_r, num_c)
+        stats["expert"] = db.insert_pronostics_expert(
+            conn, course_id, nz.parse_pronostic_expert(sel, cribles))
+    except (PmuNotFound, PmuError):
+        pass
+    except Exception as exc:  # noqa: BLE001
+        log.warning("avis expert %s : %s", cle, exc)
 
     # numPmu → idCheval, pour rattacher les performances passées : l'endpoint
     # performances-detaillees n'expose PAS idCheval, seulement numPmu.

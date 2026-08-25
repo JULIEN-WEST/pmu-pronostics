@@ -495,3 +495,29 @@ def propager_arrivees(conn, jour=None) -> int:
         log.info("arrivées propagées vers %d partant(s)", n)
     return n
 
+
+
+def insert_pronostics_expert(conn, course_id: int, lignes: list[dict]) -> int:
+    """Avis de l'analyste pour une course. Idempotent."""
+    if not lignes:
+        return 0
+    conn.cursor().executemany(
+        """
+        INSERT INTO pronostic_expert (course_id, num_pmu, rang_expert,
+                                      cote_probable, est_crible,
+                                      commentaire_expert, source_expert)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (course_id, num_pmu) DO UPDATE SET
+            rang_expert   = COALESCE(EXCLUDED.rang_expert,   pronostic_expert.rang_expert),
+            cote_probable = COALESCE(EXCLUDED.cote_probable, pronostic_expert.cote_probable),
+            est_crible    = EXCLUDED.est_crible OR pronostic_expert.est_crible,
+            commentaire_expert = COALESCE(EXCLUDED.commentaire_expert,
+                                          pronostic_expert.commentaire_expert),
+            source_expert = COALESCE(EXCLUDED.source_expert, pronostic_expert.source_expert),
+            collecte_le   = now()
+        """,
+        [(course_id, l["num_pmu"], l.get("rang_expert"), l.get("cote_probable"),
+          bool(l.get("est_crible")), l.get("commentaire_expert"), l.get("source_expert"))
+         for l in lignes],
+    )
+    return len(lignes)

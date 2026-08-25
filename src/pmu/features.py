@@ -55,6 +55,24 @@ COLONNES_MARCHE = [
     "mkt_n_releves", "mkt_rang_derive",
 ]
 
+# Avis d'expert (DATAHIPPIQUE, servi par l'API PMU).
+#
+# POURQUOI CE N'EST PAS DANS `sans_marche`
+#
+# C'est un AVIS, pas une mesure. Un analyste qui classe les partants
+# regarde à peu près ce que regarde le public, et sa cote probable sert
+# d'ancrage au marché lui-même. Le mettre dans le modèle `sans_marche`
+# détruirait la seule propriété qui rend ce modèle intéressant : être
+# indépendant du consensus. Il rejoint donc les colonnes de marché.
+#
+# En revanche, l'ÉCART entre l'avis et le marché est une information
+# neuve : c'est là où le public a bougé sans que l'analyste bouge, ou
+# l'inverse.
+COLONNES_EXPERT = [
+    "x_rang", "x_rang_rel", "x_proba", "x_crible",
+    "x_ecart_marche", "x_rang_ecart",
+]
+
 # Cibles ordinales. Une course de 14 partants n'apprend qu'un seul bit
 # au modèle si la cible est « qui gagne ». Les seuils intermédiaires
 # exploitent l'ORDRE D'ARRIVÉE, donc bien plus d'information par course,
@@ -571,6 +589,28 @@ def construire(df: pd.DataFrame, *, avec_marche: bool = True) -> pd.DataFrame:
         for col in COLONNES_MARCHE:
             df[col] = np.nan
 
+    # --- Avis de l'analyste ---
+    if "rang_expert" in df.columns:
+        rang = pd.to_numeric(df["rang_expert"], errors="coerce")
+        df["x_rang"] = rang
+        # Un 3e sur 8 n'est pas un 3e sur 18 : le rang brut ne veut rien
+        # dire sans la taille du lot.
+        df["x_rang_rel"] = rang / df["c_nb_partants"].replace(0, np.nan)
+        cote_p = pd.to_numeric(df.get("cote_probable"), errors="coerce")
+        brute = 1.0 / cote_p.replace(0, np.nan)
+        somme = brute.groupby(df["course_id"]).transform("sum")
+        df["x_proba"] = brute / somme.replace(0, np.nan)
+        df["x_crible"] = pd.to_numeric(df.get("est_crible"), errors="coerce").fillna(0.0)
+        if "mkt_proba_implicite" in df.columns:
+            # LA feature intéressante : là où le public et l'analyste ne
+            # sont pas d'accord. Positif = le public croit davantage au
+            # cheval que l'analyste.
+            df["x_ecart_marche"] = df["mkt_proba_implicite"] - df["x_proba"]
+            df["x_rang_ecart"] = df["mkt_rang_cote"] - rang
+    else:
+        for col in COLONNES_EXPERT:
+            df[col] = np.nan
+
     return df
 
 
@@ -581,6 +621,7 @@ def colonnes_features(df: pd.DataFrame, *, avec_marche: bool = False) -> list[st
     cols += [c for c in ("discipline", "specialite", "c_terrain") if c in df.columns]
     if avec_marche:
         cols += [c for c in COLONNES_MARCHE if c in df.columns]
+        cols += [c for c in COLONNES_EXPERT if c in df.columns]
     # Anti-erreur : aucune colonne de résultat ne doit passer.
     interdites = {
         "ordre_arrivee", "y_place", "statut_arrivee", "temps_officiel_ms",

@@ -378,3 +378,32 @@ CREATE TABLE IF NOT EXISTS meteo (
     collecte_le     timestamptz NOT NULL DEFAULT now(),
     PRIMARY KEY (hippodrome_code, date_course)
 );
+
+
+-- ---------------------------------------------------------------------
+-- 8. Avis d'expert (DATAHIPPIQUE, servi par l'API PMU)
+-- ---------------------------------------------------------------------
+--
+-- Un classement COMPLET des partants par un analyste, avec sa cote
+-- probable, publié AVANT la course et consultable rétroactivement.
+--
+-- C'est le seul avis expert gratuit et structuré trouvé pour ce projet :
+-- l'API généalogique de l'IFCE est commerciale (500 à 9 000 €/an) et
+-- LeTrot ne publie aucune API. Celui-ci était dans l'API qu'on
+-- interrogeait déjà.
+--
+-- ⚠️ C'est un AVIS, pas un fait. Il est corrélé au marché et n'a donc
+-- rien à faire dans le modèle `sans_marche`, dont tout l'intérêt est
+-- d'être indépendant du consensus.
+
+CREATE TABLE IF NOT EXISTS pronostic_expert (
+    course_id       bigint  NOT NULL REFERENCES course (course_id) ON DELETE CASCADE,
+    num_pmu         smallint NOT NULL,
+    rang_expert     smallint,
+    cote_probable   numeric(10,2),   -- décimale : « 3/1 » vaut 4,00
+    est_crible      boolean NOT NULL DEFAULT false,
+    commentaire_expert text,
+    source_expert   text,
+    collecte_le     timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (course_id, num_pmu)
+);

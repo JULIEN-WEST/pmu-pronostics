@@ -356,12 +356,15 @@ def _intervalle_binomial(succes: int, n: int) -> tuple[float, float]:
 SQL_BILAN = """
 SELECT c.course_id, c.discipline, c.date_reunion,
        pr.num_pmu, pr.proba, pr.rang, pr.cote,
+       px.rang_expert,
        p.ordre_arrivee,
        (SELECT count(*) FROM partant px
          WHERE px.course_id = c.course_id AND px.ordre_arrivee = 1) AS a_un_gagnant
   FROM pronostic pr
   JOIN course  c ON c.course_id = pr.course_id
   JOIN partant p ON p.course_id = pr.course_id AND p.num_pmu = pr.num_pmu
+  LEFT JOIN pronostic_expert px ON px.course_id = pr.course_id
+                                AND px.num_pmu = pr.num_pmu
  WHERE pr.modele = %(modele)s
    AND c.date_reunion BETWEEN %(depuis)s AND %(jusqua)s
    AND c.ordre_arrivee IS NOT NULL
@@ -453,6 +456,19 @@ def bilan_production(conn, *, modele: str, depuis, jusqua) -> dict:
             "top1_ic95": [round(x, 4) for x in _intervalle_binomial(s_m, n_m)],
         }
 
+    # Troisième repère : l'analyste. Le modèle n'a pas à battre le
+    # hasard, il a à battre ce que n'importe qui peut lire gratuitement
+    # avant la course.
+    if "rang_expert" in df.columns and df["rang_expert"].notna().any():
+        exp = df[df["rang_expert"].notna()]
+        idx = exp.groupby("course_id")["rang_expert"].idxmin()
+        n_e, s_e = int(exp["course_id"].nunique()), int(exp.loc[idx, "y"].sum())
+        out["expert"] = {
+            "n_courses": n_e, "top1_reussites": s_e,
+            "top1_taux": round(s_e / n_e, 4) if n_e else None,
+            "top1_ic95": [round(x, 4) for x in _intervalle_binomial(s_e, n_e)],
+        }
+
     out["par_discipline"] = {}
     for disc, sub in choix.groupby("discipline"):
         k = int(len(sub))
@@ -503,6 +519,10 @@ def afficher_bilan(b: dict) -> str:
         L.append(f"  favori du public   {m['top1_reussites']:>6} / {m['n_courses']:<7}"
                  f"  {m['top1_taux']:>6.1%}")
         L.append("  → si les deux intervalles se chevauchent, l'écart n'est pas établi")
+    e = b.get("expert")
+    if e and e.get("top1_taux") is not None:
+        L.append(f"  favori analyste    {e['top1_reussites']:>6} / {e['n_courses']:<7}"
+                 f"  {e['top1_taux']:>6.1%}")
     a = (b.get("anomalies") or {}).get("courses_sans_gagnant", 0)
     if a:
         L.append(f"  ⚠ {a} courses écartées : arrivée connue mais aucun partant "
