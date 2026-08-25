@@ -112,6 +112,16 @@ def entrainer(conn, *, avec_marche: bool = False, jusqua: date | None = None,
     pred = modele.predire(test)
     test["proba"] = pred["proba"].reindex(test.index)
     test["ecart_top2"] = pred["ecart_top2"].reindex(test.index)
+
+    # Les rapports réellement versés, quand ils ont été collectés. Ils
+    # transforment la simulation de rentabilité — jusqu'ici une
+    # ESTIMATION à partir de la cote pré-départ — en une MESURE.
+    reels = dataset.charger_rapports_reels(conn)
+    if len(reels):
+        test = test.merge(reels, on=["course_id", "num_pmu"], how="left")
+        log.info("rapports réels rattachés à %d partants sur %d",
+                 int(test["rapport_reel"].notna().sum()), len(test))
+
     rapport = ev.rapport(test)
     if par_discipline:
         rapport["arbitrage"] = modele.arbitrage

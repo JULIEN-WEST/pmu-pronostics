@@ -303,6 +303,50 @@ def charger_pour_prediction(conn, jour: date, profondeur_jours: int = 900,
     return charger(conn, jour - timedelta(days=profondeur_jours), jour, **kw)
 
 
+
+# ---------------------------------------------------------------------
+# Les rapports réellement payés
+# ---------------------------------------------------------------------
+
+SQL_RAPPORTS_REELS = """
+    SELECT r.course_id,
+           r.combinaison::smallint AS num_pmu,
+           r.rapport               AS rapport_reel
+      FROM rapport_definitif r
+     WHERE r.type_pari IN ('SIMPLE_GAGNANT', 'E_SIMPLE_GAGNANT')
+       AND r.rapport IS NOT NULL
+       AND r.combinaison ~ '^[0-9]+$'
+"""
+
+
+def charger_rapports_reels(conn) -> pd.DataFrame:
+    """
+    Ce qui a été versé pour 1 € misé, par cheval gagnant.
+
+    Sert à payer la simulation de rentabilité au tarif réel plutôt qu'à
+    une cote pré-départ corrigée d'un prélèvement supposé. Absente ou
+    vide, la table ne casse rien : la simulation retombe sur l'estimation.
+
+    Le filtre `~ '^[0-9]+$'` écarte les combinaisons de paris multiples
+    (« 9-5 ») : seul le Simple Gagnant a un sens ici, et son casting en
+    smallint échouerait sur un tiret.
+    """
+    try:
+        rows = conn.execute(SQL_RAPPORTS_REELS).fetchall()
+    except Exception as exc:  # noqa: BLE001
+        log.warning("rapports réels indisponibles : %s", exc)
+        conn.rollback()
+        return pd.DataFrame(columns=["course_id", "num_pmu", "rapport_reel"])
+    d = pd.DataFrame(rows, columns=["course_id", "num_pmu", "rapport_reel"])
+    for c in d.columns:
+        d[c] = pd.to_numeric(d[c], errors="coerce")
+    d = d.dropna(subset=["course_id", "num_pmu"])
+    # SIMPLE_GAGNANT et E_SIMPLE_GAGNANT peuvent coexister pour le même
+    # cheval. Sans ce dédoublonnage, la jointure DUPLIQUERAIT le partant
+    # dans la fenêtre de test — un pari compté deux fois.
+    return d.drop_duplicates(subset=["course_id", "num_pmu"], keep="first")
+
+
 def stats(conn) -> dict:
     """Volumétrie — sert à la santé de l'API et au capteur HA."""
     q = """

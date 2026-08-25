@@ -133,7 +133,7 @@ def face_au_marche(df: pd.DataFrame, col_proba="proba",
 def simulation(df: pd.DataFrame, *, col_proba="proba", col_cote="mkt_cote",
                cible="y_gagnant", seuils_valeur=(0.0, 0.10, 0.20, 0.30, 0.50),
                prelevement: float = PRELEVEMENT_DEFAUT,
-               mise: float = 1.0) -> pd.DataFrame:
+               mise: float = 1.0, col_reel: str | None = None) -> pd.DataFrame:
     """
     Mise à plat sur les partants dont la « valeur » dépasse un seuil.
 
@@ -153,6 +153,34 @@ def simulation(df: pd.DataFrame, *, col_proba="proba", col_cote="mkt_cote",
     d = df[df[col_cote].notna() & (df[col_cote] > 1)].copy()
     d["valeur"] = d[col_proba] * d[col_cote] - 1.0
 
+    # ── Le retour : estimé, ou mesuré ────────────────────────────────
+    #
+    # Par défaut on ESTIME le retour à partir de la cote relevée avant
+    # le départ, corrigée du prélèvement. Deux approximations s'y
+    # cachent, et elles vont en sens CONTRAIRE :
+    #
+    #   — la cote est peut-être déjà nette (le ×(1−t) serait de trop) ;
+    #   — la cote pré-départ n'est pas le rapport payé : mesuré sur 284
+    #     gagnants, le rapport vaut 0,894 fois la cote annoncée, parce
+    #     que l'argent des dernières minutes raccourcit le prix.
+    #
+    # Quand `col_reel` est fourni ET renseigné, on ne suppose plus rien :
+    # on paie ce qui a été réellement payé. C'est la seule mesure qui
+    # n'ait aucun paramètre.
+    reel = bool(col_reel and col_reel in d.columns and d[col_reel].notna().any())
+    if reel:
+        # Une course sans rapport connu doit être ÉCARTÉE, pas comptée
+        # perdante : sinon chaque rapport manquant devient une défaite
+        # imaginaire et le ROI s'effondre pour rien.
+        connues = set(d.loc[d[col_reel].notna(), "course_id"].unique())
+        avant = len(d)
+        d = d[d["course_id"].isin(connues)].copy()
+        ecartes = avant - len(d)
+        d["_paye"] = d[col_reel].fillna(0.0)
+    else:
+        ecartes = 0
+        d["_paye"] = d[col_cote] * (1.0 - prelevement)
+
     lignes = []
     for seuil in seuils_valeur:
         paris = d[d["valeur"] >= seuil]
@@ -161,10 +189,8 @@ def simulation(df: pd.DataFrame, *, col_proba="proba", col_cote="mkt_cote",
             lignes.append({"seuil_valeur": seuil, "n_paris": 0})
             continue
         gagnes = paris[cible].sum()
-        # Rapport brut × (1 − prélèvement) : la cote affichée intègre déjà
-        # le prélèvement dans un système mutuel, mais on l'applique
-        # explicitement pour rendre le paramètre visible et discutable.
-        retour = (paris.loc[paris[cible] == 1, col_cote] * mise * (1 - prelevement)).sum()
+        gain = paris[cible].mul(paris["_paye"]).mul(mise)   # 0 si le pari perd
+        retour = float(gain.sum())
         engage = n * mise
         lignes.append({
             "seuil_valeur": seuil,
@@ -173,12 +199,13 @@ def simulation(df: pd.DataFrame, *, col_proba="proba", col_cote="mkt_cote",
             "taux_reussite": round(float(gagnes / n), 4),
             "cote_moyenne": round(float(paris[col_cote].mean()), 2),
             "engage": round(engage, 2),
-            "retour": round(float(retour), 2),
+            "retour": round(retour, 2),
             "roi_pct": round(float((retour - engage) / engage * 100), 2),
             # Écart-type du ROI : sans lui, le ROI n'est pas interprétable.
             "roi_ecart_type_pct": round(
-                float(paris[cible].mul(paris[col_cote]).mul(1 - prelevement)
-                      .sub(1).std() / np.sqrt(n) * 100), 2),
+                float(gain.sub(mise).div(mise).std() / np.sqrt(n) * 100), 2),
+            "mesure": bool(reel),
+            "courses_ecartees": int(ecartes) if seuil == seuils_valeur[0] else None,
         })
     return pd.DataFrame(lignes)
 
@@ -187,7 +214,8 @@ def simulation(df: pd.DataFrame, *, col_proba="proba", col_cote="mkt_cote",
 # Rapport complet
 # ---------------------------------------------------------------------
 
-def rapport(df: pd.DataFrame, cible="y_gagnant", prelevement=PRELEVEMENT_DEFAUT) -> dict:
+def rapport(df: pd.DataFrame, cible="y_gagnant", prelevement=PRELEVEMENT_DEFAUT,
+            col_reel: str = "rapport_reel") -> dict:
     """
     `df` = fenêtre de TEST, avec au minimum : course_id, proba, la cible,
     et si possible mkt_cote / mkt_proba_implicite.
@@ -199,7 +227,19 @@ def rapport(df: pd.DataFrame, cible="y_gagnant", prelevement=PRELEVEMENT_DEFAUT)
         "marche": face_au_marche(df, cible=cible),
     }
     sim = simulation(df, cible=cible, prelevement=prelevement)
-    out["rentabilite"] = sim.to_dict("records") if len(sim) else []
+    # `_json_sur` n'est pas cosmétique ici : pandas rend des np.bool_ et
+    # des np.int64 que `json.dumps` refuse, et un rapport illisible en
+    # JSON casse l'endpoint au moment précis où on vient l'inspecter.
+    out["rentabilite"] = _json_sur(sim.to_dict("records")) if len(sim) else []
+
+    # La même simulation, mais payée aux rapports RÉELLEMENT versés.
+    # Elle ne remplace pas l'autre : les deux côte à côte montrent de
+    # combien l'estimation se trompait, et dans quel sens.
+    if col_reel and col_reel in df.columns and df[col_reel].notna().any():
+        reelle = simulation(df, cible=cible, prelevement=prelevement,
+                            col_reel=col_reel)
+        out["rentabilite_reelle"] = (
+            _json_sur(reelle.to_dict("records")) if len(reelle) else [])
 
     # Stratification par discipline : c'est le contrôle qui dira si le
     # modèle unique tient, ou s'il faut le scinder. On ne le devine pas,
@@ -580,6 +620,25 @@ def afficher(rap: dict) -> str:
                      f"{r['taux_reussite']:>10.2%} {r['roi_pct']:>+8.1f}% "
                      f"{r['roi_ecart_type_pct']:>7.1f}%")
         L.append("  ⚠ en dessous de ~500 paris, le ROI n'est pas interprétable")
+        L.append("  ⚠ retour ESTIMÉ : cote relevée avant le départ, moins le"
+                 " prélèvement supposé")
+
+    if rap.get("rentabilite_reelle"):
+        ecartees = next((r.get("courses_ecartees") for r in rap["rentabilite_reelle"]
+                         if r.get("courses_ecartees") is not None), None)
+        L.append("\n── Rentabilité mesurée (rapports réellement payés) " + "─" * 9)
+        L.append(f"  {'seuil':>7} {'paris':>8} {'réussite':>10} {'ROI':>9} {'±1σ':>8}")
+        for r in rap["rentabilite_reelle"]:
+            if not r.get("n_paris"):
+                continue
+            L.append(f"  {r['seuil_valeur']:>7.2f} {r['n_paris']:>8} "
+                     f"{r['taux_reussite']:>10.2%} {r['roi_pct']:>+8.1f}% "
+                     f"{r['roi_ecart_type_pct']:>7.1f}%")
+        L.append("  → aucun paramètre : on paie ce qui a été payé.")
+        if ecartees:
+            L.append(f"  → {ecartees} partants écartés (rapport de la course inconnu),"
+                     " et non comptés perdants.")
+        L.append("  ⚠ un ROI ne se lit qu'à partir de 2σ. Sous 2σ, c'est du bruit.")
 
     if rap.get("par_discipline"):
         L.append("\n── Par discipline " + "─" * 42)
@@ -779,6 +838,120 @@ def verifier_rapports(conn, depuis, jusqua, *, prelevement=PRELEVEMENT_DEFAUT) -
         # Facteur à appliquer aux ROI déjà publiés pour les corriger.
         "correction_roi": None if correction is None else round(correction, 4),
     }
+
+
+# ---------------------------------------------------------------------
+# LE test décisif : la surcote
+# ---------------------------------------------------------------------
+#
+# Le ratio « rapport payé / cote » mesuré sur les gagnants s'est révélé
+# ambigu : 0,894, entre 1,00 (cote nette) et 0,85 (cote brute), avec un
+# étalement énorme (Q1 0,68 — Q3 1,16). Explication : la cote relevée
+# avant le départ n'EST PAS le rapport payé — l'argent des dernières
+# minutes déplace le prix. Et comme la mesure ne porte que sur les
+# gagnants, elle est biaisée : un gagnant est justement un cheval sur
+# lequel l'argent est venu.
+#
+# Ce test-ci n'a aucun de ces défauts, parce qu'il ne regarde pas les
+# arrivées du tout. Dans un pari mutuel :
+#
+#     rapport_i = P (1 − t) / S_i        (P = masse, S_i = mises sur i)
+#
+# donc en sommant sur tous les partants d'une course :
+#
+#     Σ 1/rapport_i = (Σ S_i) / (P(1 − t)) = 1 / (1 − t)
+#
+# La somme des probabilités implicites vaut donc :
+#
+#     1,176  si la cote est DÉJÀ NETTE de prélèvement (t = 15 %)
+#     1,000  si la cote est BRUTE
+#
+# Aucune arrivée, aucun modèle, aucune sélection. Toutes les courses,
+# tous les partants.
+
+SQL_SURCOTE = """
+    SELECT cf.course_id, SUM(1.0 / cf.rapport) AS surcote, COUNT(*) AS n
+      FROM v_cote_finale cf
+      JOIN course c  ON c.course_id = cf.course_id
+      JOIN partant p ON p.course_id = cf.course_id AND p.num_pmu = cf.num_pmu
+     WHERE c.date_reunion BETWEEN %s AND %s
+       AND cf.type_pari IN ('SIMPLE_GAGNANT', 'E_SIMPLE_GAGNANT')
+       AND cf.rapport > 1
+       AND (p.statut IS NULL OR p.statut <> 'NON_PARTANT')
+     GROUP BY cf.course_id
+    HAVING COUNT(*) >= 5
+"""
+
+
+def surcote(conn, depuis, jusqua, *, prelevement=PRELEVEMENT_DEFAUT) -> dict:
+    """Somme des probabilités implicites par course. Tranche le prélèvement."""
+    try:
+        rows = conn.execute(SQL_SURCOTE, (depuis, jusqua)).fetchall()
+    except Exception as exc:  # noqa: BLE001
+        conn.rollback()
+        return {"n": 0, "verdict": "indisponible", "message": str(exc)}
+
+    d = pd.DataFrame(rows, columns=["course_id", "surcote", "n"])
+    d["surcote"] = pd.to_numeric(d["surcote"], errors="coerce")
+    d = d[d["surcote"].between(0.5, 3.0)]
+    if len(d) < 50:
+        return {"n": int(len(d)), "verdict": "insuffisant",
+                "message": "moins de 50 courses avec une cote complète"}
+
+    med = float(d["surcote"].median())
+    attendu_net = 1.0 / (1.0 - prelevement)
+
+    if abs(med - attendu_net) <= 0.03:
+        verdict = "cote_nette"
+        message = (f"Somme des probabilités implicites = {med:.3f}, soit "
+                   f"1/(1−{prelevement:.0%}). La cote est DÉJÀ NETTE : la "
+                   "simulation retire le prélèvement une seconde fois.")
+    elif abs(med - 1.0) <= 0.03:
+        verdict = "cote_brute"
+        message = ("Somme des probabilités implicites = 1,00. La cote est "
+                   "BRUTE : appliquer le prélèvement est correct.")
+    else:
+        # Le prélèvement déduit, quel qu'il soit. C'est la lecture la
+        # plus utile : elle ne suppose pas les 15 % de départ.
+        t = 1.0 - 1.0 / med if med > 0 else None
+        verdict = "cote_nette" if med > 1.05 else "inattendu"
+        if verdict == "cote_nette":
+            message = (f"Somme des probabilités implicites = {med:.3f} > 1. La "
+                       f"cote est DÉJÀ NETTE, d'un prélèvement mesuré à "
+                       f"{t:.1%} — et non des {prelevement:.0%} supposés.")
+        else:
+            message = (f"Somme des probabilités implicites = {med:.3f}. Ni 1,00 "
+                       f"ni {attendu_net:.3f} : ne rien conclure avant d'avoir "
+                       "regardé quelques courses à la main.")
+
+    t_mesure = (1.0 - 1.0 / med) if med > 1.0 else None
+    return {
+        "n": int(len(d)),
+        "surcote_mediane": round(med, 4),
+        "surcote_q1": round(float(d["surcote"].quantile(0.25)), 4),
+        "surcote_q3": round(float(d["surcote"].quantile(0.75)), 4),
+        "partants_median": int(d["n"].median()),
+        "prelevement_mesure": None if t_mesure is None else round(t_mesure, 4),
+        "verdict": verdict,
+        "message": message,
+    }
+
+
+def afficher_surcote(v: dict) -> str:
+    L = ["── Somme des probabilités implicites " + "─" * 23]
+    if v.get("verdict") in (None, "indisponible", "insuffisant"):
+        L.append(f"  {v.get('message', 'rien à mesurer')}")
+        return "\n".join(L)
+    L += [
+        f"  courses mesurées         {v['n']}",
+        f"  partants (médiane)       {v['partants_median']}",
+        f"  somme 1/cote             {v['surcote_mediane']}"
+        f"   (Q1 {v['surcote_q1']} — Q3 {v['surcote_q3']})",
+    ]
+    if v.get("prelevement_mesure") is not None:
+        L.append(f"  prélèvement déduit       {v['prelevement_mesure']:.1%}")
+    L += ["", "  " + v["message"]]
+    return "\n".join(L)
 
 
 def afficher_rapports(v: dict) -> str:

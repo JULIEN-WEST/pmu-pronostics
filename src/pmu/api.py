@@ -198,9 +198,11 @@ def rapports_payes(
         if not _table_existe(conn, "rapport_definitif"):
             raise HTTPException(503, "table rapport_definitif absente")
         v = ev.verifier_rapports(conn, d, j)
+        sur = ev.surcote(conn, d, j)
     if format.lower().startswith("t"):
-        return PlainTextResponse(ev.afficher_rapports(v))
-    return v
+        return PlainTextResponse(ev.afficher_surcote(sur) + "\n\n"
+                                 + ev.afficher_rapports(v))
+    return {"surcote": sur, "gagnants": v}
 
 
 # ---------------------------------------------------------------------

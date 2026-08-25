@@ -255,6 +255,55 @@ def rafraichir_rapports(conn, client: PmuClient, depuis: date, jusqua: date,
     return out
 
 
+def inspecter_montants(conn, client: PmuClient, jour: date) -> str:
+    """
+    L'allocation affichée est-elle juste ?
+
+    Une course de Plat à Deauville sur 3 200 m s'est affichée à 259 €,
+    ce qui est impossible : une allocation ne descend pas sous quelques
+    milliers d'euros. Soit `montantPrix` n'est pas en centimes contrairement
+    à ce que suppose `cents_to_eur`, soit il est divisé deux fois.
+
+    On ne devine pas : on met la valeur BRUTE de l'API à côté de celle
+    stockée en base, et l'écart saute aux yeux.
+    """
+    L = ["── Allocation : brut API contre base " + "─" * 22, ""]
+    try:
+        prog = client.programme(jour, use_cache=False)
+    except (PmuNotFound, PmuError) as exc:
+        return "\n".join(L + [f"  programme injoignable : {exc}"])
+
+    brut = {}
+    for r in (prog.get("reunions") or [])[:3]:
+        nr = r.get("numOfficiel")
+        for c in (r.get("courses") or [])[:3]:
+            nc = c.get("numOrdre")
+            if nr is None or nc is None:
+                continue
+            brut[(nr, nc)] = {k: v for k, v in c.items()
+                              if "ontant" in k or k in ("libelle", "distance")}
+
+    rows = conn.execute(
+        """SELECT num_reunion, num_ordre, libelle, distance, montant_prix
+             FROM course WHERE date_reunion = %s
+            ORDER BY num_reunion, num_ordre LIMIT 9""", (jour,)).fetchall()
+    en_base = {(r["num_reunion"], r["num_ordre"]): r for r in rows}
+
+    L.append(f"  {'course':<8} {'distance':>9} {'API brut':>14} {'en base':>12}")
+    for cle in sorted(set(brut) | set(en_base)):
+        b = brut.get(cle, {})
+        d = en_base.get(cle, {})
+        mp = b.get("montantPrix")
+        L.append(f"  R{cle[0]}C{cle[1]:<5} {str(b.get('distance') or d.get('distance') or '—'):>9}"
+                 f" {str(mp if mp is not None else '—'):>14}"
+                 f" {str(d.get('montant_prix') or '—'):>12}")
+    L += ["",
+          "  Lecture : si « API brut » vaut 2590000 et « en base » 25900,00,",
+          "  la conversion centimes → euros est juste. Si l'API rend 25900",
+          "  et la base 259,00, elle divise une fois de trop."]
+    return "\n".join(L)
+
+
 def inspecter_rapports(client: PmuClient, jour: date, num_r: int, num_c: int) -> str:
     """
     Imprime la charge BRUTE d'une course arrivée, puis ce que le parseur
@@ -346,7 +395,8 @@ def live_cotes(conn, client: PmuClient, jour: date | None = None,
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="Collecte PMU")
-    ap.add_argument("mode", choices=["jour", "backfill", "live", "init", "rapports"])
+    ap.add_argument("mode", choices=["jour", "backfill", "live", "init",
+                                     "rapports", "montants"])
     ap.add_argument("--date", type=lambda s: date.fromisoformat(s))
     ap.add_argument("--depuis", type=lambda s: date.fromisoformat(s))
     ap.add_argument("--jusqua", type=lambda s: date.fromisoformat(s))
@@ -395,6 +445,8 @@ def main() -> None:
             log.info("backfill terminé : %s", cumul)
         elif args.mode == "live":
             live_cotes(conn, client, args.date)
+        elif args.mode == "montants":
+            print(inspecter_montants(conn, client, args.date or date.today()))
         elif args.mode == "rapports":
             if args.verifier:
                 jour = args.date or (date.today() - timedelta(days=1))
@@ -404,6 +456,8 @@ def main() -> None:
             depuis = args.depuis or (jusqua - timedelta(days=60))
             rafraichir_rapports(conn, client, depuis, jusqua)
             from . import evaluate as ev
+            print(ev.afficher_surcote(ev.surcote(conn, depuis, jusqua)))
+            print()
             print(ev.afficher_rapports(ev.verifier_rapports(conn, depuis, jusqua)))
 
 
