@@ -8,7 +8,7 @@
 # d'après le nom de la stack. En déclarer un second provoque des
 # conteneurs orphelins à chaque redéploiement.
 #
-# ⚠️ Le numéro de version de l'image (pmu-pronostics:2.2) change à chaque
+# ⚠️ Le numéro de version de l'image (pmu-pronostics:2.3) change à chaque
 # livraison. C'est volontaire : Docker réutilise une image déjà présente
 # sans la reconstruire, donc sans un nouveau tag, un redéploiement
 # relancerait l'ANCIEN code sans rien signaler.
@@ -51,7 +51,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: pmu-pronostics:2.2
+    image: pmu-pronostics:2.3
     # Force la construction locale au lieu d'une tentative de
     # téléchargement. Sans ça, Portainer cherche « pmu-pronostics » dans
     # un registre public, ne le trouve évidemment pas, et échoue sur
@@ -99,7 +99,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: pmu-pronostics:2.2
+    image: pmu-pronostics:2.3
     pull_policy: build
     restart: unless-stopped
     depends_on:

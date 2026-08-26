@@ -292,9 +292,26 @@ def construire(df: pd.DataFrame, *, avec_marche: bool = True) -> pd.DataFrame:
     #   résultat connu, donc elle alimente les taux glissants — forme du
     #   cheval, réussite du driver, aptitude de la lignée.
     #
-    # `est_cible` : cette ligne peut servir d'EXEMPLE, à l'entraînement
-    #   comme à la prédiction. Cela exige des colonnes que les lignes
-    #   importées n'ont pas : cote, gains, musique, entraîneur.
+    # `est_cible` : cette ligne peut servir d'EXEMPLE À L'ENTRAÎNEMENT.
+    #   Cela exige un résultat (pour l'étiquette) ET les colonnes riches
+    #   que les lignes importées n'ont pas : cote, gains, musique.
+    #
+    # `est_pronosticable` : cette ligne est une course À PRÉDIRE. Elle
+    #   exige les mêmes colonnes riches, mais SURTOUT PAS de résultat —
+    #   une course qu'on pronostique n'a pas encore eu lieu.
+    #
+    # ⚠️ CES DEUX NOTIONS ONT ÉTÉ CONFONDUES, et le bug est resté
+    # invisible des semaines. `pronostiquer()` filtrait sur `est_cible`,
+    # qui exige `place.notna()` : AUCUNE course à venir ne passait le
+    # filtre. Le système ne pronostiquait donc que des courses DÉJÀ
+    # COURUES. Personne ne l'a vu parce que la table se remplissait au
+    # fil de la soirée, à mesure que les arrivées tombaient — le
+    # tableau du soir paraissait normal, et la vue vide du matin
+    # passait pour « la collecte n'a pas encore tourné ».
+    #
+    # Symptôme dans les journaux, le 26/08 à 08:02, après une collecte
+    # pourtant réussie de 449 partants :
+    #     WARNING pmu.predict | aucun partant le 2026-08-26
     #
     # Les 108 000 performances importées sont exploitables sans être des
     # cibles. Elles donnent au modèle la mémoire de chaque cheval — deux
@@ -304,6 +321,7 @@ def construire(df: pd.DataFrame, *, avec_marche: bool = True) -> pd.DataFrame:
     df["est_exploitable"] = place.notna() & df["statut"].ne("NON_PARTANT")
     source = df["source"] if "source" in df.columns else pd.Series("direct", index=df.index)
     df["est_cible"] = df["est_exploitable"] & source.eq("direct")
+    df["est_pronosticable"] = source.eq("direct") & df["statut"].ne("NON_PARTANT")
 
     # --- Contexte de course ---
     # `famille` sert à router vers un modèle spécialisé (cf. train.py). Elle
@@ -626,7 +644,10 @@ def colonnes_features(df: pd.DataFrame, *, avec_marche: bool = False) -> list[st
     interdites = {
         "ordre_arrivee", "y_place", "statut_arrivee", "temps_officiel_ms",
         "reduction_km_ms", "commentaire_apres_course", "distance_cheval_precedent",
-        "est_exploitable", "est_cible", "source",
+        # `est_pronosticable` est VRAI pour tout à la prédiction et
+        # corrélé à l'arrivée à l'entraînement : le laisser passer en
+        # feature serait une fuite.
+        "est_exploitable", "est_cible", "est_pronosticable", "source",
     }
     # Toutes les cibles ordinales sont des résultats : y_top3 dans les
     # features reviendrait à donner l'arrivée au modèle.

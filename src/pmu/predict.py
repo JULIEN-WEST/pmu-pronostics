@@ -170,10 +170,13 @@ def pronostiquer(conn, jour: date | None = None, *, modeles=("sans_marche",)) ->
         return pd.DataFrame()
 
     df = ft.construire(brut, avec_marche=True)
-    # Le filtre porte sur est_cible : une performance importée datée
-    # d'aujourd'hui (cas rare mais possible) n'est pas une course à
-    # pronostiquer, c'est une trace du passé.
-    du_jour = df[(df["date_reunion"] == jour) & df["est_cible"]].copy()
+    # ⚠️ `est_pronosticable`, PAS `est_cible`. `est_cible` exige un
+    # résultat connu : filtrer dessus revenait à ne pronostiquer que
+    # des courses déjà courues, et laissait la journée vide jusqu'au
+    # soir. Ce filtre-ci écarte les performances importées (une trace
+    # du passé n'est pas une course à prédire) et les non-partants,
+    # sans rien exiger de l'arrivée.
+    du_jour = df[(df["date_reunion"] == jour) & df["est_pronosticable"]].copy()
     # On garde les non-partants hors pronostic mais on les a laissés dans le
     # cadre pour ne pas casser les cumuls.
     du_jour = du_jour[du_jour["statut"].ne("NON_PARTANT")]
