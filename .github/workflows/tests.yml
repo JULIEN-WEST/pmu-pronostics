@@ -23,7 +23,7 @@ jobs:
           python-version: "3.12"
           cache: pip
       - name: Installer les dépendances
-        run: pip install -r requirements.txt
+        run: pip install -r requirements-service.txt
       - name: Exécuter les tests
         env:
           PYTHONPATH: src
