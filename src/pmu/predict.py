@@ -29,6 +29,10 @@ from .train import (Decoupage, ModeleParDiscipline, ModelePmu,
 log = logging.getLogger("pmu.predict")
 
 DOSSIER_MODELES = Path(os.environ.get("PMU_MODELES", "/data/modeles"))
+# Sous ce niveau de complétude, un grand écart de probabilité peut être
+# seulement l'effet des valeurs imputées. Le seuil est volontairement
+# configurable, mais jamais contourné silencieusement.
+QUALITE_MIN = float(os.environ.get("PMU_QUALITE_MIN", "0.55"))
 
 
 def _par_discipline_par_defaut() -> bool:
@@ -65,6 +69,8 @@ ALTER TABLE pronostic ADD COLUMN IF NOT EXISTS publiable boolean NOT NULL DEFAUL
 -- Note de tranchant, de 1 à 5. Les seuils viennent des quintiles
 -- mesurés sur la fenêtre de test, pas d'un choix arbitraire.
 ALTER TABLE pronostic ADD COLUMN IF NOT EXISTS note smallint;
+-- Complétude moyenne des données de la course au moment du calcul.
+ALTER TABLE pronostic ADD COLUMN IF NOT EXISTS qualite_donnees numeric(5,4);
 """
 
 
@@ -82,6 +88,32 @@ def lire_abstention(nom: str) -> dict:
 def lire_seuil_abstention(nom: str) -> float | None:
     """Seuil mesuré au dernier entraînement, None si aucun ne tenait."""
     return lire_abstention(nom).get("seuil")
+
+
+def _masque_publication(
+    pred: pd.DataFrame, confiance: dict, qualite_min: float = QUALITE_MIN,
+) -> pd.Series:
+    """
+    Autorise une publication seulement si signal ET données sont solides.
+
+    Un fichier d'abstention contenant seuil=null signifie que le modèle
+    n'a battu le marché dans aucune bande fiable : publier tout dans ce cas
+    inversait le sens de l'abstention. Un ancien modèle sans fichier garde
+    son comportement historique, mais reste soumis à la complétude.
+    """
+    qualite = pd.to_numeric(
+        pred.get("qualite_course", pd.Series(0.0, index=pred.index)),
+        errors="coerce",
+    ).fillna(0.0)
+    if not confiance:
+        signal = pd.Series(True, index=pred.index)
+    elif confiance.get("seuil") is None:
+        signal = pd.Series(False, index=pred.index)
+    else:
+        signal = pd.to_numeric(pred["ecart_top2"], errors="coerce").ge(
+            float(confiance["seuil"])
+        )
+    return signal & qualite.ge(float(qualite_min))
 
 
 # ---------------------------------------------------------------------
@@ -198,9 +230,13 @@ def pronostiquer(conn, jour: date | None = None, *, modeles=("sans_marche",)) ->
         pred["cote"] = du_jour["mkt_cote"].reindex(pred.index)
         pred["valeur"] = pred["proba"] * pred["cote"] - 1.0
         conf = lire_abstention(nom)
-        seuil = conf.get("seuil")
-        pred["publiable"] = (True if seuil is None
-                             else pred["ecart_top2"] >= seuil)
+        qualite = pd.to_numeric(
+            du_jour.get("qualite_donnees", pd.Series(0.0, index=du_jour.index)),
+            errors="coerce",
+        ).reindex(pred.index).fillna(0.0)
+        pred["qualite_donnees"] = qualite
+        pred["qualite_course"] = qualite.groupby(pred["course_id"]).transform("mean")
+        pred["publiable"] = _masque_publication(pred, conf)
         seuils = (conf.get("echelle") or {}).get("seuils") or []
         pred["note"] = [ev.note_confiance(e, seuils) for e in pred["ecart_top2"]]
 
@@ -228,19 +264,21 @@ def pronostiquer(conn, jour: date | None = None, *, modeles=("sans_marche",)) ->
         (int(r.course_id), int(r.num_pmu), float(r.proba), int(r.rang),
          float(r.ecart_top2), None if pd.isna(r.valeur) else float(r.valeur),
          None if pd.isna(r.cote) else float(r.cote), r.modele, r.details,
-         bool(r.publiable), int(r.note))
+         bool(r.publiable), int(r.note), float(r.qualite_course))
         for r in tout.itertuples()
     ]
     conn.cursor().executemany(
         """
         INSERT INTO pronostic (course_id, num_pmu, proba, rang, ecart_top2,
-                               valeur, cote, modele, details, publiable, note)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s)
+                               valeur, cote, modele, details, publiable, note,
+                               qualite_donnees)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s, %s, %s)
         ON CONFLICT (course_id, num_pmu, modele) DO UPDATE SET
             proba = EXCLUDED.proba, rang = EXCLUDED.rang,
             ecart_top2 = EXCLUDED.ecart_top2, valeur = EXCLUDED.valeur,
             cote = EXCLUDED.cote, details = EXCLUDED.details,
             publiable = EXCLUDED.publiable, note = EXCLUDED.note,
+            qualite_donnees = EXCLUDED.qualite_donnees,
             calcule_le = now()
         """,
         lignes,
@@ -267,6 +305,7 @@ def lire_pronostics(conn, jour: date, modele: str = "sans_marche") -> list[dict]
             h.libelle_long AS hippodrome, r.hippodrome_code,
             pr.num_pmu, pr.proba, pr.rang, pr.ecart_top2, pr.valeur, pr.cote,
             pr.calcule_le, pr.details, pr.publiable, pr.note,
+            pr.qualite_donnees,
             ch.nom AS cheval, ch.nom_pere, ch.nom_pere_mere,
             pd.nom_affiche AS driver, pe.nom_affiche AS entraineur, p.musique,
             p.age, p.sexe, p.place_corde, p.deferre,
@@ -314,6 +353,10 @@ def lire_pronostics(conn, jour: date, modele: str = "sans_marche") -> list[dict]
                 "publiable": bool(r["publiable"]),
                 # Note de tranchant, de 1 à 5, seuils mesurés.
                 "note": int(r["note"]) if r["note"] is not None else 1,
+                "qualite_donnees": (
+                    round(float(r["qualite_donnees"]), 3)
+                    if r["qualite_donnees"] is not None else 0.0
+                ),
                 "note_fiable": niveaux.get(
                     int(r["note"]) if r["note"] is not None else 1, False),
                 "calcule_le": r["calcule_le"].isoformat() if r["calcule_le"] else None,
@@ -339,6 +382,10 @@ def lire_pronostics(conn, jour: date, modele: str = "sans_marche") -> list[dict]
             "rang": r["rang"],
             "cote": float(r["cote"]) if r["cote"] is not None else None,
             "valeur": round(float(r["valeur"]), 3) if r["valeur"] is not None else None,
+            "qualite_donnees": (
+                round(float(r["qualite_donnees"]), 3)
+                if r["qualite_donnees"] is not None else 0.0
+            ),
             "arrivee": r["arrivee_cheval"],
             # Le « pourquoi » : motifs pondérés et faits chiffrés.
             "motifs": details.get("motifs", []),

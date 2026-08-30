@@ -34,6 +34,7 @@ sys.path.insert(0, str(RACINE / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from pmu import explain as ex, features as ft  # noqa: E402
+from pmu.train import ModelePmu  # noqa: E402
 
 
 def _cadre(n_courses=400, graine=17, cible_aleatoire=True) -> pd.DataFrame:
@@ -193,10 +194,17 @@ def test_le_canari_tient_avec_la_lignee_maternelle(enrichi):
     """
     df = enrichi[enrichi["est_cible"]].copy()
     cols = ft.colonnes_features(df, avec_marche=False)
-    X = df[cols].apply(pd.to_numeric, errors="coerce")
     y = df["y_gagnant"]
     coupe = int(len(df) * 0.7)
-    m = HistGradientBoostingClassifier(max_iter=140, random_state=0)
+    preparation = ModelePmu(colonnes=cols)
+    preparation._apprendre_categories(df.iloc[:coupe][cols])
+    X = preparation._matrice(df)
+    masque_categories = [c in preparation._colonnes_categorielles() for c in cols]
+    m = HistGradientBoostingClassifier(
+        max_iter=140,
+        random_state=0,
+        categorical_features=masque_categories if any(masque_categories) else None,
+    )
     m.fit(X.iloc[:coupe], y.iloc[:coupe])
     auc = roc_auc_score(y.iloc[coupe:], m.predict_proba(X.iloc[coupe:])[:, 1])
     assert auc < 0.58, (

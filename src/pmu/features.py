@@ -121,55 +121,132 @@ PSEUDO_N = 10.0
 # Utilitaires
 # ---------------------------------------------------------------------
 
-def _taux_glissant(
-    df: pd.DataFrame, cles: list[str], cible: str, *,
-    prior: float, pseudo_n: float = PSEUDO_N, min_n: int = 0,
-) -> tuple[pd.Series, pd.Series]:
+def _barriere_temporelle(df: pd.DataFrame) -> pd.Series:
+    """Clé de coupure : aucune observation du même instant ne peut être vue."""
+    if "heure_depart" not in df.columns:
+        return df["course_id"]
+    depart = pd.to_datetime(df["heure_depart"], utc=True, errors="coerce")
+    if depart.notna().all():
+        return depart
+    # Compatibilité avec les petits cadres de test ou les imports incomplets.
+    repli = df["course_id"].map(lambda valeur: f"course:{valeur}")
+    return depart.astype("object").where(depart.notna(), repli)
+
+
+def _cumul_strictement_avant(
+    df: pd.DataFrame, cles: list[str], valeurs: pd.Series,
+) -> pd.Series:
     """
-    Taux de réussite lissé, calculé UNIQUEMENT sur les COURSES ANTÉRIEURES.
+    Cumul par clé borné strictement avant l'heure de départ courante.
 
-    Renvoie (taux, effectif).
-
-    Le point délicat n'est pas d'exclure la ligne courante — ça, tout le
-    monde y pense. C'est d'exclure **toute la course courante**.
-
-    Exemple concret : deux demi-frères par le même père courent l'un contre
-    l'autre. Si on se contente d'un `shift(1)`, le second voit le résultat
-    du premier — alors qu'ils sont partis en même temps. Au moment de
-    prédire, cette information n'existe pas. C'est une fuite, discrète mais
-    bien réelle, et elle touche toutes les features de lignée, d'entraîneur
-    et d'écurie.
-
-    D'où le calcul :
-
-        cumul sur la clé jusqu'ici
-      − cumul sur (clé, course) jusqu'ici
-      = cumul sur les seules courses strictement antérieures
-
-    Le tri par (heure_depart, course_id) doit être fait EN AMONT : il rend
-    les lignes d'une même course contiguës, ce dont dépend ce calcul.
+    Deux courses différentes peuvent partir à la même seconde. Les grouper
+    par course_id laisserait alors la seconde course voir le résultat de la
+    première. La barrière est donc l'instant de départ, pas l'identifiant.
     """
-    # Un non-partant, ou une course sans arrivée exploitable, ne doit
-    # peser ni au numérateur ni au dénominateur.
-    poids = df["est_exploitable"].astype(float)
-    succes_ligne = df[cible].fillna(0.0) * poids
-
-    tmp = pd.DataFrame({"_s": succes_ligne, "_w": poids, "_c": df["course_id"]})
+    tmp = pd.DataFrame({
+        "_v": pd.to_numeric(valeurs, errors="coerce").fillna(0.0),
+        "_t": _barriere_temporelle(df),
+    }, index=df.index)
     for i, cle in enumerate(cles):
         tmp[f"_k{i}"] = df[cle]
     k_cols = [f"_k{i}" for i in range(len(cles))]
-
     par_cle = tmp.groupby(k_cols, sort=False, dropna=False)
-    par_cle_course = tmp.groupby(k_cols + ["_c"], sort=False, dropna=False)
+    par_depart = tmp.groupby(k_cols + ["_t"], sort=False, dropna=False)
+    return par_cle["_v"].cumsum() - par_depart["_v"].cumsum()
 
-    succes = par_cle["_s"].cumsum() - par_cle_course["_s"].cumsum()
-    effectif = par_cle["_w"].cumsum() - par_cle_course["_w"].cumsum()
 
-    taux = (succes + prior * pseudo_n) / (effectif + pseudo_n)
-    if min_n:
-        taux = taux.where(effectif >= min_n, np.nan)
-    return taux, effectif.astype(float)
+def _appliquer_prior(
+    succes: pd.Series, effectif: pd.Series, prior: float | pd.Series,
+    pseudo_n: float, min_n: int,
+) -> pd.Series:
+    """Lissage bayésien avec prior scalaire ou propre à chaque course."""
+    if isinstance(prior, pd.Series):
+        p = pd.to_numeric(prior.reindex(succes.index), errors="coerce")
+    else:
+        p = float(prior)
+    taux = (succes + p * pseudo_n) / (effectif + pseudo_n)
+    return taux.where(effectif >= min_n, np.nan) if min_n else taux
 
+
+def _taux_glissant(
+    df: pd.DataFrame, cles: list[str], cible: str, *,
+    prior: float | pd.Series, pseudo_n: float = PSEUDO_N, min_n: int = 0,
+) -> tuple[pd.Series, pd.Series]:
+    """
+    Taux lissé sur les départs strictement antérieurs.
+
+    Les lignes du même départ sont toutes exclues, même lorsqu'elles
+    appartiennent à des réunions ou des courses différentes. Une clé
+    absente reste absente : tous les parents ou drivers inconnus ne sont
+    jamais regroupés dans une fausse population commune.
+    """
+    poids = df["est_exploitable"].astype(float)
+    succes_ligne = df[cible].fillna(0.0) * poids
+    succes = _cumul_strictement_avant(df, cles, succes_ligne)
+    effectif = _cumul_strictement_avant(df, cles, poids)
+
+    valides = df[cles].notna().all(axis=1)
+    effectif = effectif.where(valides, 0.0).astype(float)
+    taux = _appliquer_prior(succes, effectif, prior, pseudo_n, min_n)
+    return taux.where(valides), effectif
+
+
+def _taux_lignee_hors_cheval(
+    df: pd.DataFrame, cles: list[str], cible: str, *,
+    prior: float | pd.Series, pseudo_n: float, min_n: int,
+) -> tuple[pd.Series, pd.Series]:
+    """
+    Réussite de la lignée portée uniquement par les AUTRES descendants.
+
+    Les propres courses du cheval sont retranchées. Le signal mesure donc
+    réellement les frères, demi-frères et autres produits du parent, au
+    lieu de répéter la forme individuelle déjà présente dans h_cheval_*.
+    """
+    poids = df["est_exploitable"].astype(float)
+    succes_ligne = df[cible].fillna(0.0) * poids
+    total_s = _cumul_strictement_avant(df, cles, succes_ligne)
+    total_n = _cumul_strictement_avant(df, cles, poids)
+    cles_propres = cles + ["id_cheval"]
+    propre_s = _cumul_strictement_avant(df, cles_propres, succes_ligne)
+    propre_n = _cumul_strictement_avant(df, cles_propres, poids)
+
+    succes = (total_s - propre_s).clip(lower=0.0)
+    effectif = (total_n - propre_n).clip(lower=0.0)
+    valides = df[cles_propres].notna().all(axis=1)
+    effectif = effectif.where(valides, 0.0).astype(float)
+    taux = _appliquer_prior(succes, effectif, prior, pseudo_n, min_n)
+    return taux.where(valides), effectif
+
+
+def _produits_distincts_avant(
+    df: pd.DataFrame, cles: list[str], condition: pd.Series,
+) -> pd.Series:
+    """Nombre d'autres produits distincts déjà observés avant le départ."""
+    valides = df[cles + ["id_cheval"]].notna().all(axis=1)
+    eligibles = df["est_exploitable"] & valides & condition.fillna(False).astype(bool)
+    marqueur = pd.Series(0.0, index=df.index)
+    candidats = df.loc[eligibles, cles + ["id_cheval"]]
+    premiers = candidats.index[~candidats.duplicated(keep="first")]
+    marqueur.loc[premiers] = 1.0
+
+    total = _cumul_strictement_avant(df, cles, marqueur)
+    propre = _cumul_strictement_avant(df, cles + ["id_cheval"], marqueur)
+    return (total - propre).clip(lower=0.0).where(valides, 0.0).astype(float)
+
+
+def _forme_recente(
+    df: pd.DataFrame, valeurs: pd.Series, fenetre: int,
+) -> tuple[pd.Series, pd.Series]:
+    """Moyenne et effectif des N dernières sorties antérieures du cheval."""
+    v = pd.to_numeric(valeurs, errors="coerce").where(df["est_exploitable"])
+    cle = df["id_cheval"]
+    moyenne = v.groupby(cle, sort=False).transform(
+        lambda serie: serie.shift(1).rolling(fenetre, min_periods=1).mean()
+    )
+    effectif = v.groupby(cle, sort=False).transform(
+        lambda serie: serie.shift(1).rolling(fenetre, min_periods=1).count()
+    )
+    return moyenne, effectif.astype(float)
 
 def _passe_du_cheval(df: pd.DataFrame, valeurs: pd.Series) -> dict:
     """
@@ -286,6 +363,12 @@ def construire(df: pd.DataFrame, *, avec_marche: bool = True) -> pd.DataFrame:
     # l'ordre d'arrivée sans avoir à écrire un modèle de rang complet.
     for nom, k in SEUILS_ORDINAUX:
         df[nom] = ((place > 0) & (place <= k)).astype(float)
+    # Score ordinal continu : 1 pour le gagnant, 0 pour le dernier.
+    # Il exploite tout le classement, mais ne sera lu qu\'au passé.
+    denominateur = (n_part - 1).replace(0, np.nan)
+    df["y_score_classement"] = (
+        1.0 - (place - 1.0) / denominateur
+    ).where(place > 0).clip(lower=0.0, upper=1.0)
     # ── Deux notions distinctes, et les confondre coûte cher ──────────
     #
     # `est_exploitable` : cette ligne COMPTE dans l'historique. Elle a un
@@ -405,6 +488,24 @@ def construire(df: pd.DataFrame, *, avec_marche: bool = True) -> pd.DataFrame:
     derniere = df.groupby("id_cheval", sort=False)["heure_depart"].shift(1)
     df["p_jours_repos"] = (df["heure_depart"] - derniere).dt.total_seconds() / 86400.0
 
+    # --- Forme réellement observée, sur plusieurs horizons ---
+    # La musique reste utile mais elle perd le niveau du lot et certains
+    # incidents. Ces moyennes utilisent les arrivées archivées, jamais la
+    # ligne courante.
+    df["h_recent_5_place"], df["h_recent_5_n"] = _forme_recente(
+        df, df["y_place"], 5
+    )
+    df["h_recent_10_place"], df["h_recent_10_n"] = _forme_recente(
+        df, df["y_place"], 10
+    )
+    df["h_recent_5_gagne"], _ = _forme_recente(df, df["y_gagnant"], 5)
+    df["h_recent_5_classement"], _ = _forme_recente(
+        df, df["y_score_classement"], 5
+    )
+    df["h_recent_tendance_place"] = (
+        df["h_recent_5_place"] - df["h_recent_10_place"]
+    )
+
     # --- Vitesse : le chrono, jusqu'ici resté en base sans servir ---
     #
     # `reduction_km_ms` est le temps au kilomètre, en millisecondes. Plus
@@ -461,14 +562,23 @@ def construire(df: pd.DataFrame, *, avec_marche: bool = True) -> pd.DataFrame:
              ("p_gains_log", "r_gains_tot", False),
              ("v_reduction_moy", "r_vitesse", True),
              ("v_reduction_best", "r_vitesse_best", True),
-             ("v_marge_moy", "r_marge", True)]
+             ("v_marge_moy", "r_marge", True),
+             ("h_recent_5_place", "r_forme_recente", False),
+             ("h_recent_5_classement", "r_classement_recent", False)]
     for col, nom, croissant in rangs:
         if col in df.columns:
             df[nom] = par_course[col].rank(pct=True, ascending=croissant)
 
     # --- Taux glissants : cheval, driver, entraîneur ---
-    prior_g = float(df.loc[df["est_exploitable"], "y_gagnant"].mean() or 0.1)
-    prior_p = float(df.loc[df["est_exploitable"], "y_place"].mean() or 0.3)
+    # Priors connus AVANT le départ. Une moyenne calculée sur tout le
+    # dataset contiendrait la fréquence des arrivées futures et créerait
+    # une fuite discrète. La probabilité neutre découle du nombre de
+    # partants et du nombre de places payées de la course courante.
+    prior_g = (1.0 / n_part.replace(0, np.nan)).fillna(0.1)
+    prior_p = (
+        pd.Series(seuil_place, index=df.index, dtype="float64")
+        / n_part.replace(0, np.nan)
+    ).clip(0.0, 1.0).fillna(0.3)
 
     specs = [
         # (nom, clés, cible, prior, pseudo_n, min_n)
@@ -551,6 +661,48 @@ def construire(df: pd.DataFrame, *, avec_marche: bool = True) -> pd.DataFrame:
                                    pseudo_n=pn, min_n=min_n)
         df[nom] = taux
         df[f"{nom}_n"] = eff
+
+    # --- Héritage démontré par les autres descendants -----------------
+    # Les anciennes features de lignée incluaient les propres courses du
+    # cheval. Elles restent utiles, mais elles répètent en partie sa forme.
+    # Les g_fratrie_* retirent explicitement ce cheval : elles répondent à
+    # la question « qu'ont fait les autres produits de ce parent ? ».
+    fratrie = [
+        ("g_fratrie_pere_place", ["nom_pere"], "y_place", prior_p, 30, 8),
+        ("g_fratrie_pere_gagne", ["nom_pere"], "y_gagnant", prior_g, 45, 12),
+        ("g_fratrie_pere_mere_place", ["nom_pere_mere"], "y_place", prior_p, 30, 8),
+    ]
+    if "nom_mere" in df.columns:
+        fratrie.append(
+            ("g_fratrie_mere_place", ["nom_mere"], "y_place", prior_p, 12, 3)
+        )
+    for nom, cles, cible, prior, pn, min_n in fratrie:
+        if all(c in df.columns for c in cles + ["id_cheval"]):
+            taux, eff = _taux_lignee_hors_cheval(
+                df, cles, cible, prior=prior, pseudo_n=pn, min_n=min_n
+            )
+            df[nom], df[f"{nom}_n"] = taux, eff
+
+    # Nombre de produits DISTINCTS déjà vus et part d'entre eux ayant
+    # gagné au moins une fois. Un cheval ayant couru cinquante fois ne
+    # compte donc pas cinquante fois dans la réputation de son père.
+    familles_produits = [
+        ("g_pere_autres", ["nom_pere"], 5, 12),
+        ("g_pere_mere_autres", ["nom_pere_mere"], 5, 12),
+    ]
+    if "nom_mere" in df.columns:
+        familles_produits.append(("g_mere_autres", ["nom_mere"], 2, 6))
+    tous = pd.Series(True, index=df.index)
+    for prefixe, cles, min_produits, pn in familles_produits:
+        produits = _produits_distincts_avant(df, cles, tous)
+        gagnants = _produits_distincts_avant(
+            df, cles, df["y_gagnant"].fillna(0).gt(0)
+        )
+        df[f"{prefixe}_produits_n"] = produits
+        df[f"{prefixe}_gagnants_n"] = gagnants
+        taux = (gagnants + prior_g * pn) / (produits + pn)
+        df[f"{prefixe}_taux_gagnants"] = taux.where(produits >= min_produits)
+
     if "g_mere" in df.columns:
         df["g_mere_terrain_delta"] = df["g_mere_terrain"] - df["g_mere"]
         # L'accouplement lui-même : ce père sur cette mère.
@@ -629,6 +781,23 @@ def construire(df: pd.DataFrame, *, avec_marche: bool = True) -> pd.DataFrame:
         for col in COLONNES_EXPERT:
             df[col] = np.nan
 
+    # --- Qualité des données -----------------------------------------
+    # Cet indice ne part PAS dans le modèle. Il sert à refuser une
+    # publication trop affirmative lorsque l'écart entre les deux premiers
+    # repose surtout sur des champs manquants.
+    cles_qualite = [
+        "c_distance", "c_nb_partants", "p_age", "mus_moy",
+        "p_nb_courses", "p_gains_log", "h_cheval_place",
+        "h_recent_5_place", "a_discipline", "nom_pere",
+        "nom_pere_mere", "id_driver", "id_entraineur",
+    ]
+    if "nom_mere" in df.columns:
+        cles_qualite.append("nom_mere")
+    cles_qualite = [c for c in cles_qualite if c in df.columns]
+    df["qualite_donnees"] = (
+        df[cles_qualite].notna().mean(axis=1) if cles_qualite else 0.0
+    )
+
     return df
 
 
@@ -642,7 +811,7 @@ def colonnes_features(df: pd.DataFrame, *, avec_marche: bool = False) -> list[st
         cols += [c for c in COLONNES_EXPERT if c in df.columns]
     # Anti-erreur : aucune colonne de résultat ne doit passer.
     interdites = {
-        "ordre_arrivee", "y_place", "statut_arrivee", "temps_officiel_ms",
+        "ordre_arrivee", "y_place", "y_score_classement", "statut_arrivee", "temps_officiel_ms",
         "reduction_km_ms", "commentaire_apres_course", "distance_cheval_precedent",
         # `est_pronosticable` est VRAI pour tout à la prédiction et
         # corrélé à l'arrivée à l'entraînement : le laisser passer en
