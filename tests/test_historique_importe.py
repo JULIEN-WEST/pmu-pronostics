@@ -36,6 +36,7 @@ if DSN:
     os.environ["DATABASE_URL"] = DSN
 
 from pmu import dataset, db, features as ft  # noqa: E402
+from pmu.train import ModelePmu  # noqa: E402
 
 
 # ---------------------------------------------------------------------
@@ -179,11 +180,18 @@ def test_le_canari_tient_avec_l_historique_importe(enrichi):
     """
     df = enrichi[enrichi["est_cible"]].copy()
     cols = ft.colonnes_features(df, avec_marche=False)
-    X = df[cols].apply(pd.to_numeric, errors="coerce")
     y = df["y_gagnant"]
 
     coupe = int(len(df) * 0.7)
-    modele = HistGradientBoostingClassifier(max_iter=120, random_state=0)
+    preparation = ModelePmu(colonnes=cols)
+    preparation._apprendre_categories(df.iloc[:coupe][cols])
+    X = preparation._matrice(df)
+    masque_categories = [c in preparation._colonnes_categorielles() for c in cols]
+    modele = HistGradientBoostingClassifier(
+        max_iter=120,
+        random_state=0,
+        categorical_features=masque_categories if any(masque_categories) else None,
+    )
     modele.fit(X.iloc[:coupe], y.iloc[:coupe])
     auc = roc_auc_score(y.iloc[coupe:], modele.predict_proba(X.iloc[coupe:])[:, 1])
 
