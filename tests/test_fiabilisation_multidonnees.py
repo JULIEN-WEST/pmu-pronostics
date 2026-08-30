@@ -110,6 +110,7 @@ def _cadre_categories(n_courses: int = 180) -> pd.DataFrame:
                 "y_gagnant": 1.0,
                 "c_terrain": "BON",
                 "p_sexe": "FEMELLE",
+                "c_vide": np.nan,
             },
             {
                 "course_id": course,
@@ -119,6 +120,7 @@ def _cadre_categories(n_courses: int = 180) -> pd.DataFrame:
                 "y_gagnant": 0.0,
                 "c_terrain": "LOURD",
                 "p_sexe": "MALE",
+                "c_vide": np.nan,
             },
         ])
     return pd.DataFrame(lignes)
@@ -130,6 +132,7 @@ def test_les_categories_sont_apprises_et_persistantes(tmp_path):
     modele = ModelePmu().entrainer(df, decoupage)
 
     assert set(modele.categories) == {"c_terrain", "p_sexe"}
+    assert modele.numeriques_vides == ["c_vide"]
     _, _, test = decoupage.masques(df["heure_depart"])
     avant = modele.predire(df[test])
     assert avant["proba"].notna().all()
@@ -137,6 +140,7 @@ def test_les_categories_sont_apprises_et_persistantes(tmp_path):
     modele.sauver(tmp_path / "modele")
     relu = ModelePmu.charger(tmp_path / "modele")
     assert relu.categories == modele.categories
+    assert relu.numeriques_vides == ["c_vide"]
     apres = relu.predire(df[test])
     pd.testing.assert_series_equal(
         avant["proba"].sort_index(), apres["proba"].sort_index(),
