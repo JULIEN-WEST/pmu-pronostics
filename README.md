@@ -56,6 +56,11 @@ docker compose exec collecteur python -m pmu.predict entrainer --avec-marche
 
 # 5. Vérifier
 curl -s http://localhost:8100/sante | jq
+
+# Après cette évolution : reconstruire puis réentraîner, car l'encodage des
+# catégories et les nouvelles features font partie du modèle sauvegardé.
+docker compose up -d --build
+docker compose exec collecteur python -m pmu.predict entrainer --avec-marche
 ```
 
 L'ordonnanceur prend ensuite le relais : programme le matin, relevé des
@@ -203,6 +208,35 @@ que lui-même dans le lourd ?* C'est l'axe « talent sur type de sol ».
 antérieures des autres produits du même étalon. `g_pere_terrain_delta`
 teste une transmission d'aptitude **spécifique**, au-delà de la qualité
 moyenne de l'étalon.
+
+### Fiabilisation multi-données
+
+La lignée ne se limite plus à une réputation générale du père :
+
+- `g_fratrie_*` retire les propres courses du cheval et ne mesure que les
+  autres descendants connus ;
+- `g_*_autres_produits_n` compte les produits distincts, pas le nombre de
+  sorties — un cheval très actif ne peut plus fabriquer seul la réputation
+  d'un étalon ;
+- `g_*_autres_taux_gagnants` mesure la part de ces autres produits ayant
+  déjà gagné, avec lissage et effectif minimum ;
+- `h_recent_5_*` et `h_recent_10_*` séparent la forme immédiate de la
+  tendance de fond en utilisant les résultats archivés ;
+- les catégories terrain, discipline, sexe, déferrage, œillères et conditions
+  de course sont maintenant encodées sur la seule fenêtre d'entraînement,
+  puis conservées avec le modèle ;
+- `qualite_donnees` mesure la complétude de chaque course. Un signal net
+  mais mal documenté est marqué non publiable.
+
+Deux corrections anti-fuite complètent ce bloc : des courses différentes
+partant exactement au même instant ne se voient plus, et les parents inconnus
+ne sont plus regroupés dans une fausse lignée commune. Les priors de victoire
+et de place viennent désormais du nombre de partants de la course, information
+connue avant le départ, et non d'une moyenne calculée sur tout le futur.
+
+Le mot « champion » n'est volontairement pas attribué à partir d'un nom ou
+d'une réputation externe non vérifiable. Le modèle utilise des performances
+réellement observées, datées et mesurables chez les autres produits.
 
 ---
 
