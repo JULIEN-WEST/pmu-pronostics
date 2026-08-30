@@ -73,7 +73,7 @@ def test_le_signal_de_lignee_exclut_les_courses_du_cheval():
         df, ["nom_pere"], "y_place", prior=0.3, pseudo_n=10, min_n=0
     )
     assert list(n) == [0.0, 0.0, 2.0]
-    assert taux.iloc[2] == np.testing.assert_allclose(
+    np.testing.assert_allclose(
         [taux.iloc[2]], [(1.0 + 3.0) / 12.0], rtol=0, atol=1e-12
     )
 
