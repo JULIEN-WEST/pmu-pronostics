@@ -20,8 +20,8 @@ python scripts/demo.py
 ```
 
 Génère un univers de courses dont on connaît la vérité, construit les
-73 features, entraîne les deux variantes du modèle et imprime le rapport
-complet. Trois minutes, aucune dépendance externe.
+variables disponibles, entraîne les deux variantes du modèle et imprime le
+rapport complet. Trois minutes, aucune dépendance externe.
 
 C'est aussi le meilleur moyen de comprendre ce que le projet produit avant
 d'investir dans la collecte.
@@ -180,7 +180,8 @@ Deux garde-fous automatiques :
 
 ## Les features
 
-73 colonnes, sept familles.
+Les colonnes sont générées dynamiquement selon les données réellement
+disponibles. Elles couvrent notamment les familles suivantes.
 
 | Préfixe | Famille | Exemples |
 |---|---|---|
@@ -190,7 +191,9 @@ Deux garde-fous automatiques :
 | `r_` | **Rang dans le lot** | rang de gains, de musique, de taux de victoire |
 | `h_` | Historique glissant | cheval, driver, entraîneur, couple, attelage |
 | `a_` | **Aptitudes** | terrain, distance, hippodrome, discipline — et leur `_delta` |
-| `g_` | **Lignée** | père, père de mère, croisement, père × terrain |
+| `g_` | **Lignée** | père, mère, père de mère, autres descendants, produits distincts |
+| `mkt_` | Marché | cote, probabilité implicite, dérive et volatilité |
+| `x_` | Avis expert | rang, probabilité et écart au marché |
 
 Trois remarques sur les choix qui comptent :
 
