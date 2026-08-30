@@ -28,6 +28,7 @@ RACINE = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(RACINE / "src"))
 
 from pmu import features as ft  # noqa: E402
+from pmu.train import ModelePmu  # noqa: E402
 from pmu.normalize import MARGE_DISTANCE, parse_marge  # noqa: E402
 
 
@@ -209,10 +210,17 @@ def test_le_chrono_de_la_course_en_cours_ne_fuit_pas(piege):
     assert any(c.startswith("v_") for c in cols), \
         "aucune feature de vitesse : le test ne prouverait rien"
 
-    X = df[cols].apply(pd.to_numeric, errors="coerce")
     y = df["y_gagnant"]
     coupe = int(len(df) * 0.7)
-    modele = HistGradientBoostingClassifier(max_iter=150, random_state=0)
+    preparation = ModelePmu(colonnes=cols)
+    preparation._apprendre_categories(df.iloc[:coupe][cols])
+    X = preparation._matrice(df)
+    masque_categories = [c in preparation._colonnes_categorielles() for c in cols]
+    modele = HistGradientBoostingClassifier(
+        max_iter=150,
+        random_state=0,
+        categorical_features=masque_categories if any(masque_categories) else None,
+    )
     modele.fit(X.iloc[:coupe], y.iloc[:coupe])
     auc = roc_auc_score(y.iloc[coupe:], modele.predict_proba(X.iloc[coupe:])[:, 1])
 
