@@ -824,4 +824,9 @@ def colonnes_features(df: pd.DataFrame, *, avec_marche: bool = False) -> list[st
     fuites = interdites.intersection(cols)
     if fuites:
         raise ValueError(f"colonnes de résultat dans les features : {sorted(fuites)}")
-    return sorted(set(cols))
+    # Une colonne entièrement vide n'apporte rien et certaines versions
+    # des moteurs d'arbres refusent de la discrétiser. Elle pourra revenir
+    # automatiquement au prochain entraînement dès que la collecte
+    # commencera réellement à l'alimenter.
+    uniques = sorted(set(cols))
+    return [c for c in uniques if df[c].notna().any()]
