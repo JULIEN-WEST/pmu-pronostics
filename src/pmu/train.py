@@ -86,14 +86,24 @@ class ModelePmu:
     # transformait silencieusement terrain, sexe, discipline, déferrage et
     # œillères en NaN : le modèle ne voyait donc pas ces informations.
     categories: dict[str, dict[str, int]] = field(default_factory=dict)
+    # Colonnes numériques sans aucune valeur sur TRAIN. Elles restent dans
+    # le contrat mais reçoivent une valeur neutre pour les moteurs qui ne
+    # savent pas discrétiser une colonne composée uniquement de NaN.
+    numeriques_vides: list[str] = field(default_factory=list)
 
     # -- interne ------------------------------------------------------
 
     def _apprendre_categories(self, train: pd.DataFrame) -> None:
         """Apprend l'encodage uniquement sur la fenêtre d'entraînement."""
         self.categories = {}
+        self.numeriques_vides = []
         for colonne in self.colonnes:
-            if colonne not in train.columns or is_numeric_dtype(train[colonne]):
+            if colonne not in train.columns:
+                self.numeriques_vides.append(colonne)
+                continue
+            if is_numeric_dtype(train[colonne]):
+                if pd.to_numeric(train[colonne], errors="coerce").notna().sum() == 0:
+                    self.numeriques_vides.append(colonne)
                 continue
             valeurs = train[colonne].dropna().astype(str)
             self.categories[colonne] = {
@@ -129,7 +139,10 @@ class ModelePmu:
                     .astype("int32")
                 )
             else:
-                out[colonne] = pd.to_numeric(serie, errors="coerce")
+                numerique = pd.to_numeric(serie, errors="coerce")
+                if colonne in self.numeriques_vides:
+                    numerique = numerique.fillna(0.0)
+                out[colonne] = numerique
         return out
 
     def _nouveau_modele(self):
@@ -227,7 +240,8 @@ class ModelePmu:
             {"modele": self.modele, "calibrateur": self.calibrateur,
              "colonnes": self.colonnes, "cible": self.cible,
              "avec_marche": self.avec_marche,
-             "categories": self.categories},
+             "categories": self.categories,
+             "numeriques_vides": self.numeriques_vides},
             dossier / "modele.joblib",
         )
         (dossier / "colonnes.json").write_text(
@@ -239,7 +253,8 @@ class ModelePmu:
         import joblib
         d = joblib.load(Path(dossier) / "modele.joblib")
         obj = cls(cible=d["cible"], avec_marche=d["avec_marche"],
-                  colonnes=d["colonnes"], categories=d.get("categories", {}))
+                  colonnes=d["colonnes"], categories=d.get("categories", {}),
+                  numeriques_vides=d.get("numeriques_vides", []))
         obj.modele, obj.calibrateur = d["modele"], d["calibrateur"]
         return obj
 
@@ -294,6 +309,7 @@ class ModeleOrdinal:
     empileur: object = None
     calibrateur: IsotonicRegression | None = None
     categories: dict[str, dict[str, int]] = field(default_factory=dict)
+    numeriques_vides: list[str] = field(default_factory=list)
 
     _apprendre_categories = ModelePmu._apprendre_categories
     _colonnes_categorielles = ModelePmu._colonnes_categorielles
@@ -376,7 +392,8 @@ class ModeleOrdinal:
                      "calibrateur": self.calibrateur, "colonnes": self.colonnes,
                      "seuils": self.seuils, "cible": self.cible,
                      "avec_marche": self.avec_marche,
-                     "categories": self.categories},
+                     "categories": self.categories,
+                     "numeriques_vides": self.numeriques_vides},
                     dossier / "ordinal.joblib")
 
     @classmethod
@@ -385,7 +402,8 @@ class ModeleOrdinal:
         d = joblib.load(Path(dossier) / "ordinal.joblib")
         o = cls(cible=d["cible"], avec_marche=d["avec_marche"],
                 colonnes=d["colonnes"], seuils=d["seuils"],
-                categories=d.get("categories", {}))
+                categories=d.get("categories", {}),
+                numeriques_vides=d.get("numeriques_vides", []))
         o.modeles, o.empileur, o.calibrateur = d["modeles"], d["empileur"], d["calibrateur"]
         return o
 
