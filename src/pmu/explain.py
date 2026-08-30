@@ -185,6 +185,16 @@ def faits(ligne: pd.Series) -> dict:
     top3 = _v(ligne, "mus_top3")
     if not pd.isna(top3) and mus_n and mus_n > 0:
         out["forme"].append(f"top 3 dans {_pct(top3)} des cas")
+    recente, recente_n = _v(ligne, "h_recent_5_place"), _v(ligne, "h_recent_5_n")
+    if not pd.isna(recente) and recente_n and recente_n >= 2:
+        out["forme"].append(
+            f"placé {_pct(recente)} du temps sur ses {int(recente_n)} dernières courses archivées"
+        )
+    tendance = _v(ligne, "h_recent_tendance_place")
+    if not pd.isna(tendance) and abs(tendance) >= 0.08:
+        out["forme"].append(
+            "forme récente en progrès" if tendance > 0 else "forme récente en retrait"
+        )
     inc = _v(ligne, "mus_incidents")
     if not pd.isna(inc) and inc > 0:
         out["forme"].append(f"{_pct(inc)} d'incidents (disqualifications, chutes)")
@@ -251,6 +261,20 @@ def faits(ligne: pd.Series) -> dict:
     if pere and not pd.isna(g_pere) and g_pere_n and g_pere_n >= 10:
         out["lignee"].append(
             f"produits de {pere} placés {_pct(g_pere)} du temps ({int(g_pere_n)} courses)")
+    autres = _v(ligne, "g_pere_autres_produits_n")
+    taux_autres = _v(ligne, "g_pere_autres_taux_gagnants")
+    if pere and autres and autres >= 5 and not pd.isna(taux_autres):
+        out["lignee"].append(
+            f"{int(autres)} autres produits connus de {pere}, "
+            f"{_pct(taux_autres)} ont déjà gagné (taux lissé)"
+        )
+    fratrie = _v(ligne, "g_fratrie_pere_place")
+    fratrie_n = _v(ligne, "g_fratrie_pere_place_n")
+    if pere and fratrie_n and fratrie_n >= 8 and not pd.isna(fratrie):
+        out["lignee"].append(
+            f"autres descendants de {pere} placés {_pct(fratrie)} du temps "
+            f"({int(fratrie_n)} sorties)"
+        )
     dt = _v(ligne, "g_pere_terrain_delta")
     if not pd.isna(dt) and abs(dt) > 0.02 and pere:
         sens = "réussit mieux" if dt > 0 else "réussit moins bien"
@@ -273,6 +297,13 @@ def faits(ligne: pd.Series) -> dict:
         out["lignee"].append(
             f"produits de {mere} placés {_pct(g_mere)} du temps "
             f"({int(g_mere_n)} courses)")
+    autres_mere = _v(ligne, "g_mere_autres_produits_n")
+    taux_mere = _v(ligne, "g_mere_autres_taux_gagnants")
+    if mere and autres_mere and autres_mere >= 2 and not pd.isna(taux_mere):
+        out["lignee"].append(
+            f"{int(autres_mere)} autres produits connus de {mere}, "
+            f"{_pct(taux_mere)} ont déjà gagné (taux lissé)"
+        )
     dm = _v(ligne, "g_mere_terrain_delta")
     if not pd.isna(dm) and abs(dm) > 0.03 and mere:
         out["lignee"].append(
