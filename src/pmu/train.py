@@ -38,6 +38,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+from pandas.api.types import is_numeric_dtype
 from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.isotonic import IsotonicRegression
 
@@ -81,11 +82,55 @@ class ModelePmu:
     colonnes: list[str] = field(default_factory=list)
     modele: object = None
     calibrateur: IsotonicRegression | None = None
+    # Dictionnaires appris sur TRAIN uniquement. Sans eux, pd.to_numeric
+    # transformait silencieusement terrain, sexe, discipline, déferrage et
+    # œillères en NaN : le modèle ne voyait donc pas ces informations.
+    categories: dict[str, dict[str, int]] = field(default_factory=dict)
 
     # -- interne ------------------------------------------------------
 
+    def _apprendre_categories(self, train: pd.DataFrame) -> None:
+        """Apprend l'encodage uniquement sur la fenêtre d'entraînement."""
+        self.categories = {}
+        for colonne in self.colonnes:
+            if colonne not in train.columns or is_numeric_dtype(train[colonne]):
+                continue
+            valeurs = train[colonne].dropna().astype(str)
+            self.categories[colonne] = {
+                valeur: i for i, valeur in enumerate(sorted(valeurs.unique()))
+            }
+
+    def _colonnes_categorielles(self) -> list[str]:
+        """
+        Catégories utilisables nativement par les arbres.
+
+        HistGradientBoosting limite une catégorie à max_bins valeurs. Les
+        colonnes du projet sont petites, mais cette garde évite qu'une
+        nouvelle spécialité très détaillée casse un entraînement.
+        """
+        return [
+            c for c, mapping in self.categories.items()
+            if c in self.colonnes and len(mapping) <= 254
+        ]
+
     def _matrice(self, df: pd.DataFrame) -> pd.DataFrame:
-        return df[self.colonnes].apply(pd.to_numeric, errors="coerce")
+        """Matrice numérique avec catégories stables et inconnues à -1."""
+        out = pd.DataFrame(index=df.index)
+        for colonne in self.colonnes:
+            serie = (
+                df[colonne] if colonne in df.columns
+                else pd.Series(np.nan, index=df.index)
+            )
+            if colonne in self.categories:
+                out[colonne] = (
+                    serie.astype("string")
+                    .map(self.categories[colonne])
+                    .fillna(-1)
+                    .astype("int32")
+                )
+            else:
+                out[colonne] = pd.to_numeric(serie, errors="coerce")
+        return out
 
     def _nouveau_modele(self):
         if LIGHTGBM:  # pragma: no cover
@@ -95,11 +140,20 @@ class ModelePmu:
                 subsample_freq=1, colsample_bytree=0.75, reg_lambda=1.0,
                 random_state=0, verbose=-1,
             )
+        masque = [c in self._colonnes_categorielles() for c in self.colonnes]
         return HistGradientBoostingClassifier(
             max_iter=500, learning_rate=0.05, max_leaf_nodes=63,
             min_samples_leaf=40, l2_regularization=1.0,
+            categorical_features=masque if any(masque) else None,
             early_stopping=True, validation_fraction=0.1, random_state=0,
         )
+
+    def _ajuster(self, modele, X: pd.DataFrame, y: pd.Series) -> None:
+        """Ajuste un arbre en déclarant les catégories quand c'est possible."""
+        if LIGHTGBM and self._colonnes_categorielles():  # pragma: no cover
+            modele.fit(X, y, categorical_feature=self._colonnes_categorielles())
+        else:
+            modele.fit(X, y)
 
     @staticmethod
     def _normaliser_par_course(p: np.ndarray, courses: pd.Series) -> np.ndarray:
@@ -124,9 +178,10 @@ class ModelePmu:
         if m_train.sum() == 0 or m_calib.sum() == 0:
             raise ValueError("fenêtres d'entraînement ou de calibration vides")
 
+        self._apprendre_categories(df.loc[m_train, self.colonnes])
         X, y = self._matrice(df), df[self.cible]
         self.modele = self._nouveau_modele()
-        self.modele.fit(X[m_train], y[m_train])
+        self._ajuster(self.modele, X[m_train], y[m_train])
         log.info("entraîné sur %d partants, %d features", m_train.sum(), len(self.colonnes))
 
         # Calibration sur une fenêtre POSTÉRIEURE, jamais vue à l'entraînement.
@@ -171,7 +226,8 @@ class ModelePmu:
         joblib.dump(
             {"modele": self.modele, "calibrateur": self.calibrateur,
              "colonnes": self.colonnes, "cible": self.cible,
-             "avec_marche": self.avec_marche},
+             "avec_marche": self.avec_marche,
+             "categories": self.categories},
             dossier / "modele.joblib",
         )
         (dossier / "colonnes.json").write_text(
@@ -182,7 +238,8 @@ class ModelePmu:
     def charger(cls, dossier: str | Path) -> "ModelePmu":
         import joblib
         d = joblib.load(Path(dossier) / "modele.joblib")
-        obj = cls(cible=d["cible"], avec_marche=d["avec_marche"], colonnes=d["colonnes"])
+        obj = cls(cible=d["cible"], avec_marche=d["avec_marche"],
+                  colonnes=d["colonnes"], categories=d.get("categories", {}))
         obj.modele, obj.calibrateur = d["modele"], d["calibrateur"]
         return obj
 
@@ -236,9 +293,13 @@ class ModeleOrdinal:
     modeles: dict = field(default_factory=dict)
     empileur: object = None
     calibrateur: IsotonicRegression | None = None
+    categories: dict[str, dict[str, int]] = field(default_factory=dict)
 
+    _apprendre_categories = ModelePmu._apprendre_categories
+    _colonnes_categorielles = ModelePmu._colonnes_categorielles
     _matrice = ModelePmu._matrice
     _nouveau_modele = ModelePmu._nouveau_modele
+    _ajuster = ModelePmu._ajuster
     _normaliser_par_course = staticmethod(ModelePmu._normaliser_par_course)
 
     def _scores(self, df: pd.DataFrame) -> np.ndarray:
@@ -264,10 +325,11 @@ class ModeleOrdinal:
         if m_train.sum() == 0 or m_calib.sum() == 0:
             raise ValueError("fenêtres d'entraînement ou de calibration vides")
 
+        self._apprendre_categories(df.loc[m_train, self.colonnes])
         X = self._matrice(df)
         for nom in self.seuils:
             modele = self._nouveau_modele()
-            modele.fit(X[m_train], df.loc[m_train, nom])
+            self._ajuster(modele, X[m_train], df.loc[m_train, nom])
             self.modeles[nom] = modele
         log.info("ordinal : %d seuils sur %d partants", len(self.seuils), m_train.sum())
 
@@ -313,7 +375,8 @@ class ModeleOrdinal:
         joblib.dump({"modeles": self.modeles, "empileur": self.empileur,
                      "calibrateur": self.calibrateur, "colonnes": self.colonnes,
                      "seuils": self.seuils, "cible": self.cible,
-                     "avec_marche": self.avec_marche},
+                     "avec_marche": self.avec_marche,
+                     "categories": self.categories},
                     dossier / "ordinal.joblib")
 
     @classmethod
@@ -321,7 +384,8 @@ class ModeleOrdinal:
         import joblib
         d = joblib.load(Path(dossier) / "ordinal.joblib")
         o = cls(cible=d["cible"], avec_marche=d["avec_marche"],
-                colonnes=d["colonnes"], seuils=d["seuils"])
+                colonnes=d["colonnes"], seuils=d["seuils"],
+                categories=d.get("categories", {}))
         o.modeles, o.empileur, o.calibrateur = d["modeles"], d["empileur"], d["calibrateur"]
         return o
 
